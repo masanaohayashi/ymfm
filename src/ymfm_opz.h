@@ -183,6 +183,11 @@ public:
 	// lfo_am_offset, computed for all eight channels together
 	void all_lfo_am_offsets(uint32_t *out) const;
 
+	// recompute every operator's phase step for this sample; same result as
+	// compute_phase_step, for the whole chip at once
+	bool all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t const *block_freq,
+		uint32_t const *detune, uint32_t const *multiple, uint32_t *step);
+
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
@@ -279,7 +284,7 @@ protected:
 	uint8_t m_noise_lfo;                  // latched LFO noise value
 	uint8_t m_lfo_am[2];                  // current LFO AM value
 	uint8_t m_regdata[REGISTERS];         // register data
-	uint16_t m_phase_substep[OPERATORS];  // phase substep for fixed frequency
+	uint32_t m_phase_substep[OPERATORS];  // phase substep for fixed frequency
 	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms
 };
@@ -293,6 +298,16 @@ protected:
 // and envelope shift registers from preset memory, which moves underneath it.
 template<>
 constexpr bool write_is_pure<opz_registers>(uint16_t regnum) { return regnum != 0x08; }
+
+// Operator numbering puts a slot's eight channels in eight consecutive
+// operators, and both offsets are the plain index, so every register the step
+// needs loads as eight consecutive bytes with nothing to gather.
+template<>
+inline bool dynamic_phase_steps<opz_registers>(opz_registers &regs, int32_t lfo_raw_pm, uint32_t count,
+	uint32_t const *block_freq, uint32_t const *detune, uint32_t const *multiple, uint32_t *step)
+{
+	return regs.all_phase_steps(lfo_raw_pm, count, block_freq, detune, multiple, step);
+}
 
 // OPZ channel offsets are the channel numbers, so the sensitivity fields for
 // all eight channels sit in eight consecutive register bytes.

@@ -19,6 +19,11 @@
 namespace ymfm
 {
 
+// Block, keycode and fraction to a 0.10 phase step, before the octave shift.
+// Shared because the vector path for the per-sample step needs to index it
+// directly; the scalar conversion in ymfm_fm.ipp reads the same table.
+extern uint32_t const g_phase_step_table[12 * 64];
+
 // Advance every operator's phase by one sample. count is a multiple of 8;
 // padding entries carry a step of zero and so stay put.
 void phase_clock(uint32_t *phase, uint32_t const *step, uint32_t count);

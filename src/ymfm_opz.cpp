@@ -29,6 +29,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ymfm_opz.h"
+#include "ymfm_dynstep.h"
 #include "ymfm_lfo.h"
 #include "ymfm_fm.ipp"
 
@@ -177,7 +178,14 @@ void opz_registers::save_restore(ymfm_saved_state &state)
 	state.save_restore(m_noise_state);
 	state.save_restore(m_noise_lfo);
 	state.save_restore(m_regdata);
-	state.save_restore(m_phase_substep);
+	// round-trip through the original type: the storage widened, the snapshot
+	// format must not
+	for (uint32_t opnum = 0; opnum < OPERATORS; opnum++)
+	{
+		uint16_t substep = uint16_t(m_phase_substep[opnum]);
+		state.save_restore(substep);
+		m_phase_substep[opnum] = substep;
+	}
 }
 
 
@@ -357,6 +365,39 @@ int32_t opz_registers::clock_noise_and_lfo()
 //-------------------------------------------------
 //  lfo_am_offset - return the AM offset from LFO
 //  for the given channel
+//-------------------------------------------------
+
+bool opz_registers::all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t const *block_freq,
+	uint32_t const *detune, uint32_t const *multiple, uint32_t *step)
+{
+#if YMFM_HAVE_VECTOR_DYNSTEP
+	assert(count <= OPERATORS);
+	dyn_step_block block;
+	block.step = step;
+	block.block_freq = block_freq;
+	block.detune = detune;
+	block.multiple = multiple;
+	block.detune2_reg = &m_regdata[0xc0];
+	block.fix_reg = &m_regdata[0x80];
+	// fix range and frequency share the register with detune and multiple
+	block.range_reg = &m_regdata[0x40];
+	block.fine_reg = &m_regdata[0x100];
+	block.pm_sens_reg = &m_regdata[0x38];
+	block.pm2_sens_reg = &m_regdata[0x180];
+	block.substep = m_phase_substep;
+	block.lfo_raw_pm = lfo_raw_pm;
+	block.count = count;
+	dyn_step_clock(block);
+	return true;
+#else
+	(void)lfo_raw_pm; (void)count; (void)block_freq; (void)detune; (void)multiple; (void)step;
+	return false;
+#endif
+}
+
+
+//-------------------------------------------------
+//  all_lfo_am_offsets - every channel's AM offset
 //-------------------------------------------------
 
 void opz_registers::all_lfo_am_offsets(uint32_t *out) const

@@ -57,6 +57,13 @@
     #define YMFM_HAVE_VECTOR_PHASE  0
 #endif
 
+// Set where a vector per-sample phase step exists.
+#if YMFM_USE_NEON_INTRINSIC
+    #define YMFM_HAVE_VECTOR_DYNSTEP  1
+#else
+    #define YMFM_HAVE_VECTOR_DYNSTEP  0
+#endif
+
 // Set where a vector output stage exists, so the engine knows to use it.
 #if defined(YMFM_HAVE_VECTOR_OUTPUT_OVERRIDE)
     #define YMFM_HAVE_VECTOR_OUTPUT  YMFM_HAVE_VECTOR_OUTPUT_OVERRIDE

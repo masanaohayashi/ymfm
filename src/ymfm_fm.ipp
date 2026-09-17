@@ -225,57 +225,6 @@ inline uint32_t opm_key_code_to_phase_step(uint32_t block_freq, int32_t delta)
 	// Unfortunately, the computed table differs in a few spots from the data
 	// verified from an actual chip. The table below comes from David Viens'
 	// analysis, used with his permission.
-	static const uint32_t s_phase_step[12*64] =
-	{
-		41568,41600,41632,41664,41696,41728,41760,41792,41856,41888,41920,41952,42016,42048,42080,42112,
-		42176,42208,42240,42272,42304,42336,42368,42400,42464,42496,42528,42560,42624,42656,42688,42720,
-		42784,42816,42848,42880,42912,42944,42976,43008,43072,43104,43136,43168,43232,43264,43296,43328,
-		43392,43424,43456,43488,43552,43584,43616,43648,43712,43744,43776,43808,43872,43904,43936,43968,
-		44032,44064,44096,44128,44192,44224,44256,44288,44352,44384,44416,44448,44512,44544,44576,44608,
-		44672,44704,44736,44768,44832,44864,44896,44928,44992,45024,45056,45088,45152,45184,45216,45248,
-		45312,45344,45376,45408,45472,45504,45536,45568,45632,45664,45728,45760,45792,45824,45888,45920,
-		45984,46016,46048,46080,46144,46176,46208,46240,46304,46336,46368,46400,46464,46496,46528,46560,
-		46656,46688,46720,46752,46816,46848,46880,46912,46976,47008,47072,47104,47136,47168,47232,47264,
-		47328,47360,47392,47424,47488,47520,47552,47584,47648,47680,47744,47776,47808,47840,47904,47936,
-		48032,48064,48096,48128,48192,48224,48288,48320,48384,48416,48448,48480,48544,48576,48640,48672,
-		48736,48768,48800,48832,48896,48928,48992,49024,49088,49120,49152,49184,49248,49280,49344,49376,
-		49440,49472,49504,49536,49600,49632,49696,49728,49792,49824,49856,49888,49952,49984,50048,50080,
-		50144,50176,50208,50240,50304,50336,50400,50432,50496,50528,50560,50592,50656,50688,50752,50784,
-		50880,50912,50944,50976,51040,51072,51136,51168,51232,51264,51328,51360,51424,51456,51488,51520,
-		51616,51648,51680,51712,51776,51808,51872,51904,51968,52000,52064,52096,52160,52192,52224,52256,
-		52384,52416,52448,52480,52544,52576,52640,52672,52736,52768,52832,52864,52928,52960,52992,53024,
-		53120,53152,53216,53248,53312,53344,53408,53440,53504,53536,53600,53632,53696,53728,53792,53824,
-		53920,53952,54016,54048,54112,54144,54208,54240,54304,54336,54400,54432,54496,54528,54592,54624,
-		54688,54720,54784,54816,54880,54912,54976,55008,55072,55104,55168,55200,55264,55296,55360,55392,
-		55488,55520,55584,55616,55680,55712,55776,55808,55872,55936,55968,56032,56064,56128,56160,56224,
-		56288,56320,56384,56416,56480,56512,56576,56608,56672,56736,56768,56832,56864,56928,56960,57024,
-		57120,57152,57216,57248,57312,57376,57408,57472,57536,57568,57632,57664,57728,57792,57824,57888,
-		57952,57984,58048,58080,58144,58208,58240,58304,58368,58400,58464,58496,58560,58624,58656,58720,
-		58784,58816,58880,58912,58976,59040,59072,59136,59200,59232,59296,59328,59392,59456,59488,59552,
-		59648,59680,59744,59776,59840,59904,59936,60000,60064,60128,60160,60224,60288,60320,60384,60416,
-		60512,60544,60608,60640,60704,60768,60800,60864,60928,60992,61024,61088,61152,61184,61248,61280,
-		61376,61408,61472,61536,61600,61632,61696,61760,61824,61856,61920,61984,62048,62080,62144,62208,
-		62272,62304,62368,62432,62496,62528,62592,62656,62720,62752,62816,62880,62944,62976,63040,63104,
-		63200,63232,63296,63360,63424,63456,63520,63584,63648,63680,63744,63808,63872,63904,63968,64032,
-		64096,64128,64192,64256,64320,64352,64416,64480,64544,64608,64672,64704,64768,64832,64896,64928,
-		65024,65056,65120,65184,65248,65312,65376,65408,65504,65536,65600,65664,65728,65792,65856,65888,
-		65984,66016,66080,66144,66208,66272,66336,66368,66464,66496,66560,66624,66688,66752,66816,66848,
-		66944,66976,67040,67104,67168,67232,67296,67328,67424,67456,67520,67584,67648,67712,67776,67808,
-		67904,67936,68000,68064,68128,68192,68256,68288,68384,68448,68512,68544,68640,68672,68736,68800,
-		68896,68928,68992,69056,69120,69184,69248,69280,69376,69440,69504,69536,69632,69664,69728,69792,
-		69920,69952,70016,70080,70144,70208,70272,70304,70400,70464,70528,70560,70656,70688,70752,70816,
-		70912,70976,71040,71104,71136,71232,71264,71360,71424,71488,71552,71616,71648,71744,71776,71872,
-		71968,72032,72096,72160,72192,72288,72320,72416,72480,72544,72608,72672,72704,72800,72832,72928,
-		72992,73056,73120,73184,73216,73312,73344,73440,73504,73568,73632,73696,73728,73824,73856,73952,
-		74080,74144,74208,74272,74304,74400,74432,74528,74592,74656,74720,74784,74816,74912,74944,75040,
-		75136,75200,75264,75328,75360,75456,75488,75584,75648,75712,75776,75840,75872,75968,76000,76096,
-		76224,76288,76352,76416,76448,76544,76576,76672,76736,76800,76864,76928,77024,77120,77152,77248,
-		77344,77408,77472,77536,77568,77664,77696,77792,77856,77920,77984,78048,78144,78240,78272,78368,
-		78464,78528,78592,78656,78688,78784,78816,78912,78976,79040,79104,79168,79264,79360,79392,79488,
-		79616,79680,79744,79808,79840,79936,79968,80064,80128,80192,80256,80320,80416,80512,80544,80640,
-		80768,80832,80896,80960,80992,81088,81120,81216,81280,81344,81408,81472,81568,81664,81696,81792,
-		81952,82016,82080,82144,82176,82272,82304,82400,82464,82528,82592,82656,82752,82848,82880,82976
-	};
 
 	// extract the block (octave) first
 	uint32_t block = bitfield(block_freq, 10, 3);
@@ -300,7 +249,7 @@ inline uint32_t opm_key_code_to_phase_step(uint32_t block_freq, int32_t delta)
 		{
 			eff_freq += 768;
 			if (block-- == 0)
-				return s_phase_step[0] >> 7;
+				return g_phase_step_table[0] >> 7;
 		}
 
 		// maximum delta is +512+608 (PM+detune), so we can overflow by up to 2 octaves
@@ -310,12 +259,12 @@ inline uint32_t opm_key_code_to_phase_step(uint32_t block_freq, int32_t delta)
 			if (eff_freq >= 768)
 				block++, eff_freq -= 768;
 			if (block++ >= 7)
-				return s_phase_step[767];
+				return g_phase_step_table[767];
 		}
 	}
 
 	// look up the phase shift for the key code, then shift by octave
-	return s_phase_step[eff_freq] >> (block ^ 7);
+	return g_phase_step_table[eff_freq] >> (block ^ 7);
 }
 
 
@@ -1221,6 +1170,9 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	// padding past the real operator count has to be defined
 	std::memset(m_op_phase, 0, sizeof(m_op_phase));
 	std::memset(m_op_phase_step, 0, sizeof(m_op_phase_step));
+	std::memset(m_op_block_freq, 0, sizeof(m_op_block_freq));
+	std::memset(m_op_detune, 0, sizeof(m_op_detune));
+	std::memset(m_op_multiple, 0, sizeof(m_op_multiple));
 	std::memset(m_op_eg_shift, 0, sizeof(m_op_eg_shift));
 	std::memset(m_op_total_level, 0, sizeof(m_op_total_level));
 	std::memset(m_op_am_mask, 0, sizeof(m_op_am_mask));
@@ -1316,6 +1268,9 @@ void fm_engine_base<RegisterType>::publish_op_cache(uint32_t opnum, uint32_t opo
 	m_eg_cur_inc[opnum] = m_eg_inc[current][opnum];
 
 	m_op_phase_step[opnum] = cache.phase_step;
+	m_op_block_freq[opnum] = cache.block_freq;
+	m_op_detune[opnum] = uint32_t(cache.detune);
+	m_op_multiple[opnum] = cache.multiple;
 	m_op_eg_shift[opnum] = cache.eg_shift;
 	m_op_total_level[opnum] = cache.total_level;
 	m_op_am_mask[opnum] = m_regs.op_lfo_am_enable(opoffs) ? 0xffffffffu : 0u;
@@ -1479,23 +1434,27 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 		// The whole chip's phase in one pass. Only the operators the cache
 		// marked dynamic need a step recomputed; everyone else kept theirs
 		// from the last prepare, so the rest is a straight parallel add.
-		for (uint32_t index = 0; index < m_dynamic_count; index++)
+		// The step a static operator would compute here is the one it already
+		// has, so the whole chip can go through the same pass rather than
+		// gathering the dynamic ones out of it; when nothing is dynamic there
+		// is nothing to do at all.
+		if (m_dynamic_count != 0
+			&& !dynamic_phase_steps<RegisterType>(m_regs, lfo_raw_pm, EG_COUNT,
+				m_op_block_freq, m_op_detune, m_op_multiple, m_op_phase_step))
 		{
-			uint32_t const opnum = m_dynamic_ops[index];
-			m_op_phase_step[opnum] = m_operator[opnum]->dynamic_phase_step(lfo_raw_pm);
+			for (uint32_t index = 0; index < m_dynamic_count; index++)
+			{
+				uint32_t const opnum = m_dynamic_ops[index];
+				m_op_phase_step[opnum] = m_operator[opnum]->dynamic_phase_step(lfo_raw_pm);
+			}
 		}
 		phase_clock(m_op_phase, m_op_phase_step, EG_COUNT);
 
-		// The operator half of fm_channel::clock is what we just did; the
-		// feedback shift register is all that is left. It lives in the
-		// engine's arrays too, so this is eight contiguous lanes; kept inline
-		// rather than sent to a kernel because at one vector wide the call
-		// costs more than the work, and it compiles to the same instructions.
-		for (uint32_t chnum = 0; chnum < CH_COUNT; chnum++)
-		{
-			m_ch_fb0[chnum] = m_ch_fb1[chnum];
-			m_ch_fb1[chnum] = m_ch_fb_in[chnum];
-		}
+		// the operator half of fm_channel::clock is what we just did; the
+		// feedback shift register is all that is left, and it lives in the
+		// engine's arrays too, so it goes eight lanes at a time as well
+		static_assert(CH_COUNT == 8 || !VECTOR_PHASE, "the slot helpers take eight channels");
+		feedback_clock_x8(m_ch_fb0, m_ch_fb1, m_ch_fb_in);
 	}
 	else
 	{
@@ -1567,12 +1526,7 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 		if (m_vector_output_now && rshift == 0 && !YMFM_DEBUG_LOG_WAVFILES)
 		{
 			lfo_am_offsets<RegisterType>(m_regs, m_ch_offs, CHANNELS, m_ch_am_offset);
-			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
-			{
-				uint32_t const clocked = bitfield(chanmask, chnum) ? 0xffffffffu : 0u;
-				m_ch_active[chnum] = clocked;
-				m_ch_contributes[chnum] = clocked & m_ch_out_any[chnum];
-			}
+			channel_masks_x8(chanmask, m_ch_out_any, m_ch_active, m_ch_contributes);
 
 			m_out_block.clipmax = clipmax;
 
