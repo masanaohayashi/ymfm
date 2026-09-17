@@ -179,6 +179,10 @@ public:
 	// clock the noise and LFO, if present, returning LFO PM value
 	int32_t clock_noise_and_lfo();
 
+	// return every channel's AM offset at once; same formula as
+	// lfo_am_offset, computed for all eight channels together
+	void all_lfo_am_offsets(uint32_t *out) const;
+
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
@@ -280,6 +284,25 @@ protected:
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms
 };
 
+
+
+// A write to an OPZ register is a plain store plus, for a few registers, a
+// mirror into one of the shadow banks; which of those happens depends only on
+// the register number and the data, so repeating a write changes nothing that
+// a cache reads. Register 0x08 is the exception: it reloads the sustain level
+// and envelope shift registers from preset memory, which moves underneath it.
+template<>
+constexpr bool write_is_pure<opz_registers>(uint16_t regnum) { return regnum != 0x08; }
+
+// OPZ channel offsets are the channel numbers, so the sensitivity fields for
+// all eight channels sit in eight consecutive register bytes.
+template<>
+inline void lfo_am_offsets<opz_registers>(opz_registers const &regs, uint32_t const *, uint32_t count, uint32_t *out)
+{
+	assert(count == opz_registers::CHANNELS);
+	(void)count;
+	regs.all_lfo_am_offsets(out);
+}
 
 
 //*********************************************************

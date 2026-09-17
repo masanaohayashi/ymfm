@@ -826,8 +826,9 @@ template<class RegisterType>
 fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32_t chnum, uint32_t choffs) :
 	m_choffs(choffs),
 	m_chnum(chnum),
-	m_feedback{ 0, 0 },
-	m_feedback_in(0),
+	m_feedback_0(owner.ch_feedback_0(chnum)),
+	m_feedback_1(owner.ch_feedback_1(chnum)),
+	m_feedback_in(owner.ch_feedback_next(chnum)),
 	m_op{ nullptr, nullptr, nullptr, nullptr },
 	m_regs(owner.regs()),
 	m_owner(owner)
@@ -843,7 +844,7 @@ template<class RegisterType>
 void fm_channel<RegisterType>::reset()
 {
 	// reset our data
-	m_feedback[0] = m_feedback[1] = 0;
+	m_feedback_0 = m_feedback_1 = 0;
 	m_feedback_in = 0;
 }
 
@@ -855,9 +856,15 @@ void fm_channel<RegisterType>::reset()
 template<class RegisterType>
 void fm_channel<RegisterType>::save_restore(ymfm_saved_state &state)
 {
-	state.save_restore(m_feedback[0]);
-	state.save_restore(m_feedback[1]);
-	state.save_restore(m_feedback_in);
+	// round-trip through the original types: the storage changed, the snapshot
+	// format must not
+	int16_t fb0 = int16_t(m_feedback_0), fb1 = int16_t(m_feedback_1), fbin = int16_t(m_feedback_in);
+	state.save_restore(fb0);
+	state.save_restore(fb1);
+	state.save_restore(fbin);
+	m_feedback_0 = fb0;
+	m_feedback_1 = fb1;
+	m_feedback_in = fbin;
 }
 
 
@@ -908,8 +915,8 @@ template<class RegisterType>
 void fm_channel<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 {
 	// clock the feedback through
-	m_feedback[0] = m_feedback[1];
-	m_feedback[1] = m_feedback_in;
+	m_feedback_0 = m_feedback_1;
+	m_feedback_1 = m_feedback_in;
 
 	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
 		if (m_op[opnum] != nullptr)
@@ -955,10 +962,10 @@ void fm_channel<RegisterType>::output_2op(output_data &output, uint32_t rshift, 
 	int32_t opmod = 0;
 	uint32_t feedback = m_regs.ch_feedback(m_choffs);
 	if (feedback != 0)
-		opmod = (m_feedback[0] + m_feedback[1]) >> (10 - feedback);
+		opmod = (m_feedback_0 + m_feedback_1) >> (10 - feedback);
 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
-	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
+	int32_t op1value = m_feedback_in = int16_t(m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset));
 
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
@@ -973,12 +980,12 @@ void fm_channel<RegisterType>::output_2op(output_data &output, uint32_t rshift, 
 	{
 		// some OPL chips use the previous sample for modulation instead of
 		// the current sample
-		opmod = (RegisterType::MODULATOR_DELAY ? m_feedback[1] : op1value) >> 1;
+		opmod = (RegisterType::MODULATOR_DELAY ? m_feedback_1 : op1value) >> 1;
 		result = m_op[1]->compute_volume(m_op[1]->phase() + opmod, am_offset) >> rshift;
 	}
 	else
 	{
-		result = (RegisterType::MODULATOR_DELAY ? m_feedback[1] : op1value) >> rshift;
+		result = (RegisterType::MODULATOR_DELAY ? m_feedback_1 : op1value) >> rshift;
 		result += m_op[1]->compute_volume(m_op[1]->phase(), am_offset) >> rshift;
 		int32_t clipmin = -clipmax - 1;
 		result = clamp(result, clipmin, clipmax);
@@ -1012,10 +1019,10 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	int32_t opmod = 0;
 	uint32_t feedback = m_regs.ch_feedback(m_choffs);
 	if (feedback != 0)
-		opmod = (m_feedback[0] + m_feedback[1]) >> (10 - feedback);
+		opmod = (m_feedback_0 + m_feedback_1) >> (10 - feedback);
 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
-	int32_t op1value = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
+	int32_t op1value = m_feedback_in = int16_t(m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset));
 
 	// now that the feedback has been computed, skip the rest if all volumes
 	// are clear; no need to do all this work for nothing
@@ -1109,10 +1116,10 @@ void fm_channel<RegisterType>::output_rhythm_ch6(output_data &output, uint32_t r
 	int32_t opmod = 0;
 	uint32_t feedback = m_regs.ch_feedback(m_choffs);
 	if (feedback != 0)
-		opmod = (m_feedback[0] + m_feedback[1]) >> (10 - feedback);
+		opmod = (m_feedback_0 + m_feedback_1) >> (10 - feedback);
 
 	// compute the 14-bit volume/value of operator 1 and update the feedback
-	int32_t opout1 = m_feedback_in = m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset);
+	int32_t opout1 = m_feedback_in = int16_t(m_op[0]->compute_volume(m_op[0]->phase() + opmod, am_offset));
 
 	// compute the 14-bit volume/value of operator 2, which is the result
 	opmod = bitfield(m_regs.ch_algorithm(m_choffs), 0) ? 0 : (opout1 >> 1);
@@ -1207,9 +1214,13 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	// inform the interface of their engine
 	m_intf.m_engine = this;
 
+	m_shadow_generation = 1;
+	std::memset(m_write_shadow, 0, sizeof(m_write_shadow));
+
 	// the envelope arrays are read as whole eight-operator groups, so the
 	// padding past the real operator count has to be defined
 	std::memset(m_op_phase, 0, sizeof(m_op_phase));
+	std::memset(m_op_phase_step, 0, sizeof(m_op_phase_step));
 	std::memset(m_op_eg_shift, 0, sizeof(m_op_eg_shift));
 	std::memset(m_op_total_level, 0, sizeof(m_op_total_level));
 	std::memset(m_op_am_mask, 0, sizeof(m_op_am_mask));
@@ -1218,6 +1229,11 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	std::memset(m_ch_algorithm, 0, sizeof(m_ch_algorithm));
 	std::memset(m_ch_out0_mask, 0, sizeof(m_ch_out0_mask));
 	std::memset(m_ch_out1_mask, 0, sizeof(m_ch_out1_mask));
+	std::memset(m_ch_out_any, 0, sizeof(m_ch_out_any));
+	std::memset(m_ch_offs, 0, sizeof(m_ch_offs));
+	std::memset(m_ch_fb0, 0, sizeof(m_ch_fb0));
+	std::memset(m_ch_fb1, 0, sizeof(m_ch_fb1));
+	std::memset(m_ch_fb_in, 0, sizeof(m_ch_fb_in));
 	for (uint32_t opnum = 0; opnum < EG_COUNT; opnum++)
 		m_op_waveform[opnum] = nullptr;
 	std::memset(m_eg_atten, 0, sizeof(m_eg_atten));
@@ -1240,6 +1256,37 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
 		m_wavfile[chnum].set_index(chnum);
 #endif
+
+	// the kernels read through a block of pointers that never change
+	m_eg_block.atten = m_eg_atten;
+	m_eg_block.state = m_eg_state;
+	m_eg_block.sustain = m_eg_sustain;
+	m_eg_block.cur_rate = m_eg_cur_rate;
+	m_eg_block.cur_inc = m_eg_cur_inc;
+	m_eg_block.rate_of = &m_eg_rate[0][0];
+	m_eg_block.inc_of = &m_eg_inc[0][0];
+	m_eg_block.count = EG_COUNT;
+	m_eg_block.has_reverb = RegisterType::EG_HAS_REVERB;
+
+	m_out_block.phase = m_op_phase;
+	m_out_block.env_atten = m_eg_atten;
+	m_out_block.eg_shift = m_op_eg_shift;
+	m_out_block.total_level = m_op_total_level;
+	m_out_block.am_mask = m_op_am_mask;
+	m_out_block.waveform = m_op_waveform;
+	m_out_block.slot_base = m_slot_base;
+	m_out_block.am_offset = m_ch_am_offset;
+	m_out_block.fb_shift = m_ch_fb_shift;
+	m_out_block.fb_mask = m_ch_fb_mask;
+	m_out_block.fb0 = m_ch_fb0;
+	m_out_block.fb1 = m_ch_fb1;
+	m_out_block.fb_in = m_ch_fb_in;
+	m_out_block.active = m_ch_active;
+	m_out_block.algorithm = m_ch_algorithm;
+	m_out_block.out0_mask = m_ch_out0_mask;
+	m_out_block.out1_mask = m_ch_out1_mask;
+	m_out_block.contributes = m_ch_contributes;
+	m_out_block.clipmax = 0;
 
 	// do the initial operator assignment
 	assign_operators();
@@ -1268,6 +1315,7 @@ void fm_engine_base<RegisterType>::publish_op_cache(uint32_t opnum, uint32_t opo
 	m_eg_cur_rate[opnum] = m_eg_rate[current][opnum];
 	m_eg_cur_inc[opnum] = m_eg_inc[current][opnum];
 
+	m_op_phase_step[opnum] = cache.phase_step;
 	m_op_eg_shift[opnum] = cache.eg_shift;
 	m_op_total_level[opnum] = cache.total_level;
 	m_op_am_mask[opnum] = m_regs.op_lfo_am_enable(opoffs) ? 0xffffffffu : 0u;
@@ -1290,6 +1338,8 @@ void fm_engine_base<RegisterType>::publish_channel_cache(uint32_t chnum, uint32_
 	m_ch_algorithm[chnum] = algorithm_ops_for(m_regs.ch_algorithm(choffs));
 	m_ch_out0_mask[chnum] = m_regs.ch_output_0(choffs) ? 0xffffffffu : 0u;
 	m_ch_out1_mask[chnum] = m_regs.ch_output_1(choffs) ? 0xffffffffu : 0u;
+	m_ch_out_any[chnum] = m_regs.ch_output_any(choffs) ? 0xffffffffu : 0u;
+	m_ch_offs[chnum] = choffs;
 }
 
 
@@ -1305,6 +1355,9 @@ void fm_engine_base<RegisterType>::reset()
 
 	// register type-specific initialization
 	m_regs.reset();
+
+	// the register file just changed underneath the shadow
+	forget_written_values();
 
 	// explicitly write to the mode register since it has side-effects
 	// QUESTION: old cores initialize this to 0x30 -- who is right?
@@ -1327,6 +1380,9 @@ void fm_engine_base<RegisterType>::reset()
 template<class RegisterType>
 void fm_engine_base<RegisterType>::save_restore(ymfm_saved_state &state)
 {
+	// a restore replaces the register file wholesale
+	forget_written_values();
+
 	// save our data
 	state.save_restore(m_env_counter);
 	state.save_restore(m_status);
@@ -1379,6 +1435,14 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 				if (m_channel[chnum]->prepare())
 					m_active_channels |= 1 << chnum;
 
+		// Collect the operators whose step moves every sample. Everything
+		// else keeps the published step, so the per-sample pass is a straight
+		// add over the whole chip.
+		m_dynamic_count = 0;
+		for (uint32_t opnum = 0; opnum < OPERATORS; opnum++)
+			if (m_operator[opnum] != nullptr && m_operator[opnum]->cached_phase_step() == opdata_cache::PHASE_STEP_DYNAMIC)
+				m_dynamic_ops[m_dynamic_count++] = uint8_t(opnum);
+
 		// Whether the vector output stage applies depends only on the
 		// registers, so decide it here rather than on every sample. Noise
 		// steals channel 7's fourth operator, and a two-operator channel has a
@@ -1406,23 +1470,39 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 	// only used by families whose SSG-EG stage has to run in between
 	if (!RegisterType::EG_HAS_SSG && bitfield(m_env_counter, 0, 2) == 0)
 	{
-		eg_block block;
-		block.atten = m_eg_atten;
-		block.state = m_eg_state;
-		block.sustain = m_eg_sustain;
-		block.cur_rate = m_eg_cur_rate;
-		block.cur_inc = m_eg_cur_inc;
-		block.rate_of = &m_eg_rate[0][0];
-		block.inc_of = &m_eg_inc[0][0];
-		block.count = EG_COUNT;
-		block.has_reverb = RegisterType::EG_HAS_REVERB;
-		eg_clock(block, m_env_counter >> 2);
+		eg_clock(m_eg_block, m_env_counter >> 2);
 	}
 
 	// now update the state of all the channels and operators
-	for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
-		if (bitfield(chanmask, chnum))
-			m_channel[chnum]->clock(m_env_counter, lfo_raw_pm);
+	if (VECTOR_PHASE && chanmask == RegisterType::ALL_CHANNELS)
+	{
+		// The whole chip's phase in one pass. Only the operators the cache
+		// marked dynamic need a step recomputed; everyone else kept theirs
+		// from the last prepare, so the rest is a straight parallel add.
+		for (uint32_t index = 0; index < m_dynamic_count; index++)
+		{
+			uint32_t const opnum = m_dynamic_ops[index];
+			m_op_phase_step[opnum] = m_operator[opnum]->dynamic_phase_step(lfo_raw_pm);
+		}
+		phase_clock(m_op_phase, m_op_phase_step, EG_COUNT);
+
+		// The operator half of fm_channel::clock is what we just did; the
+		// feedback shift register is all that is left. It lives in the
+		// engine's arrays too, so this is eight contiguous lanes; kept inline
+		// rather than sent to a kernel because at one vector wide the call
+		// costs more than the work, and it compiles to the same instructions.
+		for (uint32_t chnum = 0; chnum < CH_COUNT; chnum++)
+		{
+			m_ch_fb0[chnum] = m_ch_fb1[chnum];
+			m_ch_fb1[chnum] = m_ch_fb_in[chnum];
+		}
+	}
+	else
+	{
+		for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+			if (bitfield(chanmask, chnum))
+				m_channel[chnum]->clock(m_env_counter, lfo_raw_pm);
+	}
 
 	// return the envelope counter as it is used to clock ADPCM-A
 	return m_env_counter;
@@ -1486,46 +1566,21 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 		// sample down the per-channel path instead.
 		if (m_vector_output_now && rshift == 0 && !YMFM_DEBUG_LOG_WAVFILES)
 		{
+			lfo_am_offsets<RegisterType>(m_regs, m_ch_offs, CHANNELS, m_ch_am_offset);
 			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
 			{
-				uint32_t const choffs = m_channel[chnum]->choffs();
-				bool const clocked = bitfield(chanmask, chnum) != 0;
-				m_ch_am_offset[chnum] = m_regs.lfo_am_offset(choffs);
-				m_ch_active[chnum] = clocked ? 0xffffffffu : 0u;
-				m_ch_contributes[chnum] =
-					(clocked && m_regs.ch_output_any(choffs) != 0) ? 0xffffffffu : 0u;
-				m_ch_feedback_sum[chnum] = m_channel[chnum]->feedback_sum();
-				m_ch_feedback_io[chnum] = m_channel[chnum]->feedback_in();
+				uint32_t const clocked = bitfield(chanmask, chnum) ? 0xffffffffu : 0u;
+				m_ch_active[chnum] = clocked;
+				m_ch_contributes[chnum] = clocked & m_ch_out_any[chnum];
 			}
 
-			fm_output_block block;
-			block.phase = m_op_phase;
-			block.env_atten = m_eg_atten;
-			block.eg_shift = m_op_eg_shift;
-			block.total_level = m_op_total_level;
-			block.am_mask = m_op_am_mask;
-			block.waveform = m_op_waveform;
-			block.slot_base = m_slot_base;
-			block.am_offset = m_ch_am_offset;
-			block.fb_shift = m_ch_fb_shift;
-			block.fb_mask = m_ch_fb_mask;
-			block.feedback_sum = m_ch_feedback_sum;
-			block.feedback_io = m_ch_feedback_io;
-			block.active = m_ch_active;
-			block.algorithm = m_ch_algorithm;
-			block.out0_mask = m_ch_out0_mask;
-			block.out1_mask = m_ch_out1_mask;
-			block.contributes = m_ch_contributes;
-			block.clipmax = clipmax;
+			m_out_block.clipmax = clipmax;
 
 			int32_t out0 = output.data[0];
 			int32_t out1 = output.data[1 % RegisterType::OUTPUTS];
-			fm_output_4op_x8(block, out0, out1);
+			fm_output_4op_x8(m_out_block, out0, out1);
 			output.data[0] = out0;
 			output.data[1 % RegisterType::OUTPUTS] = out1;
-
-			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
-				m_channel[chnum]->set_feedback_in(m_ch_feedback_io[chnum]);
 			return;
 		}
 #endif
@@ -1566,14 +1621,31 @@ void fm_engine_base<RegisterType>::write(uint16_t regnum, uint8_t data)
 		return;
 	}
 
-	// for now just mark all channels as modified
-	m_modified_channels = ALL_CHANNELS;
+	// Most of what a running firmware writes is the value the register
+	// already holds, and that cannot change any cached value. The write still
+	// goes through for its side effects; only the invalidation is skipped.
+	bool modified = true;
+	if (write_is_pure<RegisterType>(regnum) && regnum < RegisterType::REGISTERS)
+	{
+		uint32_t const stamped = (m_shadow_generation << 8) | data;
+		modified = (m_write_shadow[regnum] != stamped);
+		m_write_shadow[regnum] = stamped;
+	}
+	else
+	{
+		// this write can reach registers other than its own, so nothing we
+		// remember about the register file can be trusted afterwards
+		forget_written_values();
+	}
 
 	// most writes are passive, consumed only when needed
 	uint32_t keyon_channel;
 	uint32_t keyon_opmask;
 	if (m_regs.write(regnum, data, keyon_channel, keyon_opmask))
 	{
+		// key state lives outside the register file, so this always counts
+		modified = true;
+
 		// handle writes to the keyon register(s)
 		if (keyon_channel < CHANNELS)
 		{
@@ -1588,6 +1660,9 @@ void fm_engine_base<RegisterType>::write(uint16_t regnum, uint8_t data)
 			m_channel[8]->keyonoff(bitfield(keyon_opmask, 2) | (bitfield(keyon_opmask, 1) << 1), KEYON_RHYTHM, 8);
 		}
 	}
+
+	if (modified)
+		m_modified_channels = ALL_CHANNELS;
 }
 
 

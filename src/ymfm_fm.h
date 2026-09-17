@@ -35,6 +35,7 @@
 
 #include "ymfm_eg.h"
 #include "ymfm_fmout.h"
+#include "ymfm_phase.h"
 
 #define YMFM_DEBUG_LOG_WAVFILES (0)
 
@@ -194,6 +195,12 @@ public:
 	// master clocking function
 	void clock(uint32_t env_counter, int32_t lfo_raw_pm);
 
+	// recompute the step for an operator whose cache marked it dynamic
+	uint32_t dynamic_phase_step(int32_t lfo_raw_pm) const { return m_regs.compute_phase_step(m_choffs, m_opoffs, m_cache, lfo_raw_pm); }
+
+	// the cached step, PHASE_STEP_DYNAMIC if it has to be recomputed
+	uint32_t cached_phase_step() const { return m_cache.phase_step; }
+
 	// return the current phase value
 	uint32_t phase() const { return m_phase >> 10; }
 
@@ -274,7 +281,7 @@ public:
 	uint32_t choffs() const { return m_choffs; }
 
 	// feedback access for the vector output stage
-	int32_t feedback_sum() const { return int32_t(m_feedback[0]) + int32_t(m_feedback[1]); }
+	int32_t feedback_sum() const { return m_feedback_0 + m_feedback_1; }
 	int32_t feedback_in() const { return m_feedback_in; }
 	void set_feedback_in(int32_t value) const { m_feedback_in = int16_t(value); }
 
@@ -295,6 +302,10 @@ public:
 
 	// master clocking function
 	void clock(uint32_t env_counter, int32_t lfo_raw_pm);
+
+	// advance the feedback shift register; the operator half of clock() is
+	// done for the whole chip at once when the engine takes the phase stage
+	void clock_feedback() { m_feedback_0 = m_feedback_1; m_feedback_1 = m_feedback_in; }
 
 	// specific 2-operator and 4-operator output handlers
 	void output_2op(output_data &output, uint32_t rshift, int32_t clipmax) const;
@@ -343,8 +354,9 @@ private:
 	// internal state
 	uint32_t m_choffs;                     // channel offset in registers
 	uint32_t m_chnum;                      // index into the engine's parallel arrays
-	int16_t m_feedback[2];                 // feedback memory for operator 1
-	mutable int16_t m_feedback_in;         // next input value for op 1 feedback (set in output)
+	int32_t &m_feedback_0;                 // feedback memory for operator 1,
+	int32_t &m_feedback_1;                 //   as views into the engine's arrays
+	int32_t &m_feedback_in;                // next input value for op 1 feedback (set in output)
 	std::array<fm_operator<RegisterType> *, 4> m_op; // up to 4 operators
 	RegisterType &m_regs;                  // direct reference to registers
 	fm_engine_base<RegisterType> &m_owner; // reference to the owning engine
@@ -356,6 +368,28 @@ private:
 // fm_engine_base represents a set of operators and channels which together
 // form a Yamaha FM core; chips that implement other engines (ADPCM, wavetable,
 // etc) take this output and combine it with the others externally
+// Whether repeating a write of the same value to the same register leaves
+// every cached value alone. It is only true where the write's whole effect is
+// a function of the register number and the data, so it is off by default and
+// a family opts in by specializing this. Where it holds, a register file that
+// is rewritten with values it already has costs nothing: the TX81Z firmware
+// rewrites the same pitch and level bytes on every LFO pass, and without this
+// each one forces a full re-decode of every operator on the chip.
+template<class RegisterType>
+constexpr bool write_is_pure(uint16_t) { return false; }
+
+
+// Every channel's LFO AM offset in one call. The offset moves every sample, so
+// this is the one piece of register decoding the output stage cannot cache; a
+// family whose formula suits it specializes this to do the whole set at once.
+template<class RegisterType>
+void lfo_am_offsets(RegisterType const &regs, uint32_t const *choffs, uint32_t count, uint32_t *out)
+{
+	for (uint32_t chnum = 0; chnum < count; chnum++)
+		out[chnum] = regs.lfo_am_offset(choffs[chnum]);
+}
+
+
 template<class RegisterType>
 class fm_engine_base : public ymfm_engine_callbacks
 {
@@ -440,6 +474,9 @@ public:
 	uint32_t &eg_atten(uint32_t opnum) { return m_eg_atten[opnum]; }
 	uint32_t &eg_state(uint32_t opnum) { return m_eg_state[opnum]; }
 	uint32_t &op_phase(uint32_t opnum) { return m_op_phase[opnum]; }
+	int32_t &ch_feedback_0(uint32_t chnum) { return m_ch_fb0[chnum]; }
+	int32_t &ch_feedback_1(uint32_t chnum) { return m_ch_fb1[chnum]; }
+	int32_t &ch_feedback_next(uint32_t chnum) const { return m_ch_fb_in[chnum]; }
 	void publish_op_cache(uint32_t opnum, uint32_t opoffs, opdata_cache const &cache);
 	void publish_channel_cache(uint32_t chnum, uint32_t choffs);
 	uint32_t channel_algorithm(uint32_t chnum) const { return m_ch_algorithm[chnum]; }
@@ -458,6 +495,19 @@ protected:
 	// assign the current set of operators to channels
 	void assign_operators();
 
+	// Drop what we remember having written, so the next write to each register
+	// counts as a change again. Stamping a generation rather than clearing the
+	// table keeps this O(1), which matters because a family that does not opt
+	// in to the check lands here on every write.
+	void forget_written_values()
+	{
+		if (++m_shadow_generation >= (1u << 24))
+		{
+			std::memset(m_write_shadow, 0, sizeof(m_write_shadow));
+			m_shadow_generation = 1;
+		}
+	}
+
 	// update the state of the given timer
 	void update_timer(uint32_t which, uint32_t enable, int32_t delta_clocks);
 
@@ -473,12 +523,21 @@ protected:
 	uint32_t m_active_channels;      // mask of active channels (computed by prepare)
 	uint32_t m_modified_channels;    // mask of channels that have been modified
 	uint32_t m_prepare_count;        // counter to do periodic prepare sweeps
+	// The last value written to each register, tagged with the generation it
+	// was written in, so the whole table invalidates at once.
+	uint32_t m_shadow_generation;
+	uint32_t m_write_shadow[RegisterType::REGISTERS];
 	// Envelope state as parallel arrays, one entry per operator, rounded up so
 	// the vector path can always take eight at a time. Operator numbering puts
 	// a slot's eight channels in eight consecutive entries.
 	static constexpr uint32_t EG_COUNT = (OPERATORS + 7) & ~7u;
+	// Whether the engine may clock phase for the whole chip at once. Families
+	// with SSG-EG rewrite the phase from inside the envelope stage, and ones
+	// that reassign operators cannot count on a stable numbering.
+	static constexpr bool VECTOR_PHASE = !RegisterType::EG_HAS_SSG && !RegisterType::DYNAMIC_OPS;
 	static constexpr uint32_t CH_COUNT = (CHANNELS + 7) & ~7u;
 	alignas(16) uint32_t m_op_phase[EG_COUNT];        // 10.10 phase
+	alignas(16) uint32_t m_op_phase_step[EG_COUNT];   // step to add each sample
 	alignas(16) uint32_t m_eg_atten[EG_COUNT];
 	alignas(16) uint32_t m_eg_state[EG_COUNT];
 	alignas(16) uint32_t m_eg_sustain[EG_COUNT];
@@ -499,15 +558,32 @@ protected:
 	alignas(16) uint32_t m_ch_algorithm[CH_COUNT];   // packed algorithm word
 	alignas(16) uint32_t m_ch_out0_mask[CH_COUNT];
 	alignas(16) uint32_t m_ch_out1_mask[CH_COUNT];
+	alignas(16) uint32_t m_ch_out_any[CH_COUNT];     // routed to either output
+	alignas(16) uint32_t m_ch_offs[CH_COUNT];        // register offset per channel
+
+	// The operator-1 feedback shift register, held here rather than inside
+	// each channel so the output stage reads and writes it in place. Values
+	// are int16, widened so a whole slot loads as one vector.
+	alignas(16) int32_t m_ch_fb0[CH_COUNT];
+	alignas(16) int32_t m_ch_fb1[CH_COUNT];
+	alignas(16) mutable int32_t m_ch_fb_in[CH_COUNT];  // written by output()
 
 	// Scratch for the vector output stage, refilled each sample. Mutable
 	// because output() is const, like the feedback value it carries.
 	alignas(16) mutable uint32_t m_ch_am_offset[CH_COUNT];
 	alignas(16) mutable uint32_t m_ch_active[CH_COUNT];
 	alignas(16) mutable uint32_t m_ch_contributes[CH_COUNT];
-	alignas(16) mutable int32_t m_ch_feedback_sum[CH_COUNT];
-	alignas(16) mutable int32_t m_ch_feedback_io[CH_COUNT];
 	uint32_t m_slot_base[4];
+	// The two kernels take a block of pointers into the arrays above. Those
+	// pointers never move, so the blocks are built once instead of being
+	// refilled on every sample.
+	eg_block m_eg_block;
+	mutable fm_output_block m_out_block;
+	// Operators whose step has to be recomputed every sample, because PM or
+	// fix-frequency mode makes it move. Rebuilt whenever prepare runs; usually
+	// either empty or the whole chip, so the common case costs one test.
+	uint8_t m_dynamic_ops[OPERATORS];
+	uint32_t m_dynamic_count;
 	bool m_vector_output_ok;         // operator numbering suits the vector path
 	bool m_vector_output_now;        // and the current register state allows it
 	RegisterType m_regs;             // register accessor

@@ -44,4 +44,18 @@ uint16_t const g_power_table[256] =
 };
 #undef X
 
+#if !YMFM_HAVE_VECTOR_OUTPUT
+
+void lfo_am_offsets_x8(uint8_t const *sens0, uint8_t const *sens1, uint32_t am0, uint32_t am1, uint32_t *out)
+{
+	for (uint32_t chnum = 0; chnum < 8; chnum++)
+	{
+		uint32_t const s0 = sens0[chnum] & 3;
+		uint32_t const s1 = sens1[chnum] & 3;
+		out[chnum] = ((s0 != 0) ? (am0 << (s0 - 1)) : 0) + ((s1 != 0) ? (am1 << (s1 - 1)) : 0);
+	}
+}
+
+#endif
+
 }

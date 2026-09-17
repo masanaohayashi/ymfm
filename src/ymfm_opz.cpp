@@ -369,6 +369,17 @@ int32_t opz_registers::clock_noise_and_lfo()
 //  for the given channel
 //-------------------------------------------------
 
+void opz_registers::all_lfo_am_offsets(uint32_t *out) const
+{
+	lfo_am_offsets_x8(&m_regdata[0x38], &m_regdata[0x180], m_lfo_am[0], m_lfo_am[1], out);
+}
+
+
+//-------------------------------------------------
+//  lfo_am_offset - return the AM offset from LFO
+//  for the given channel
+//-------------------------------------------------
+
 uint32_t opz_registers::lfo_am_offset(uint32_t choffs) const
 {
 	// not sure how this works for real, but just adding the two

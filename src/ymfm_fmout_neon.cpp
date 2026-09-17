@@ -171,6 +171,34 @@ inline int32_t horizontal_add(pairs32 v)
 
 }
 
+//-------------------------------------------------
+//  lfo_am_offsets_x8 - every channel's AM offset
+//-------------------------------------------------
+
+void lfo_am_offsets_x8(uint8_t const *sens0, uint8_t const *sens1, uint32_t am0, uint32_t am1, uint32_t *out)
+{
+	uint16x8_t const wide0 = vmovl_u8(vand_u8(vld1_u8(sens0), vdup_n_u8(3)));
+	uint16x8_t const wide1 = vmovl_u8(vand_u8(vld1_u8(sens1), vdup_n_u8(3)));
+	uint32x4_t const s0[2] = {vmovl_u16(vget_low_u16(wide0)), vmovl_u16(vget_high_u16(wide0))};
+	uint32x4_t const s1[2] = {vmovl_u16(vget_low_u16(wide1)), vmovl_u16(vget_high_u16(wide1))};
+
+	uint32x4_t const zero = vdupq_n_u32(0);
+	uint32x4_t const one = vdupq_n_u32(1);
+	uint32x4_t const value0 = vdupq_n_u32(am0);
+	uint32x4_t const value1 = vdupq_n_u32(am1);
+
+	for (uint32_t half = 0; half < 2; half++)
+	{
+		// a sensitivity of zero is silence, not a shift of minus one
+		uint32x4_t term0 = vshlq_u32(value0, vreinterpretq_s32_u32(vsubq_u32(s0[half], one)));
+		uint32x4_t term1 = vshlq_u32(value1, vreinterpretq_s32_u32(vsubq_u32(s1[half], one)));
+		term0 = vbslq_u32(vceqq_u32(s0[half], zero), zero, term0);
+		term1 = vbslq_u32(vceqq_u32(s1[half], zero), zero, term1);
+		vst1q_u32(&out[half * 4], vaddq_u32(term0, term1));
+	}
+}
+
+
 void fm_output_4op_x8(fm_output_block const &block, int32_t &out0, int32_t &out1)
 {
 	pair32 const am_offset = load_u(block.am_offset);
@@ -179,7 +207,9 @@ void fm_output_4op_x8(fm_output_block const &block, int32_t &out0, int32_t &out1
 	pair32 const algorithm = load_u(block.algorithm);
 	pair32 const active = load_u(block.active);
 	pair32 const contributes = load_u(block.contributes);
-	pairs32 const fb_sum = load_s(block.feedback_sum);
+	pairs32 const fb_prev0 = load_s(block.fb0);
+	pairs32 const fb_prev1 = load_s(block.fb1);
+	pairs32 const fb_sum = {vaddq_s32(fb_prev0.lo, fb_prev1.lo), vaddq_s32(fb_prev0.hi, fb_prev1.hi)};
 
 	// operator 1 takes its own previous output back as modulation
 	pairs32 const opmod1 = {
@@ -191,10 +221,10 @@ void fm_output_4op_x8(fm_output_block const &block, int32_t &out0, int32_t &out1
 	pairs32 const op1 = compute_volume(block, 0, opmod1, am_offset);
 
 	// channels that are not clocked keep their previous operator-1 value
-	pairs32 const previous = load_s(block.feedback_io);
+	pairs32 const previous = load_s(block.fb_in);
 	pairs32 const stored = sel_s(active, to_int16(op1), previous);
-	vst1q_s32(&block.feedback_io[0], stored.lo);
-	vst1q_s32(&block.feedback_io[4], stored.hi);
+	vst1q_s32(&block.fb_in[0], stored.lo);
+	vst1q_s32(&block.fb_in[4], stored.hi);
 
 	pairs32 opout[8];
 	int32x4_t const zero = vdupq_n_s32(0);

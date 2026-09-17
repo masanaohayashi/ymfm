@@ -37,10 +37,11 @@ struct fm_output_block
 	uint32_t const *am_offset;         // [8] LFO AM amount per channel
 	uint32_t const *fb_shift;          // [8] 10 - feedback
 	uint32_t const *fb_mask;           // [8] zero when feedback is off
-	int32_t const *feedback_sum;       // [8] previous two operator-1 outputs
+	int32_t const *fb0;                // [8] operator-1 output two samples back
+	int32_t const *fb1;                // [8] and one sample back
 	// read and written: channels that are not clocked this sample keep the
 	// operator-1 value they had, exactly as skipping them would
-	int32_t *feedback_io;              // [8]
+	int32_t *fb_in;                    // [8] operator-1 output for this sample
 	uint32_t const *active;            // [8] all ones when the channel is clocked
 	uint32_t const *algorithm;         // [8] packed wiring word
 	uint32_t const *out0_mask;         // [8]
@@ -48,6 +49,12 @@ struct fm_output_block
 	uint32_t const *contributes;       // [8] active and routed somewhere
 	int32_t clipmax;
 };
+
+// Eight channels' LFO AM offsets at once. The sensitivity fields sit in the
+// low bits of eight consecutive register bytes, so the whole set loads without
+// any gathering; a sensitivity of zero means no AM rather than a shift of -1,
+// so each term is masked instead of branched on.
+void lfo_am_offsets_x8(uint8_t const *sens0, uint8_t const *sens1, uint32_t am0, uint32_t am1, uint32_t *out);
 
 // Accumulates the eight channels into the two outputs. Only defined for
 // targets with a vector implementation; callers must check

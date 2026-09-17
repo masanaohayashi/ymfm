@@ -50,6 +50,13 @@
     #define YMFM_HAVE_VECTOR_EG  0
 #endif
 
+// Set where a vector phase stage exists.
+#if YMFM_USE_NEON_INTRINSIC
+    #define YMFM_HAVE_VECTOR_PHASE  1
+#else
+    #define YMFM_HAVE_VECTOR_PHASE  0
+#endif
+
 // Set where a vector output stage exists, so the engine knows to use it.
 #if defined(YMFM_HAVE_VECTOR_OUTPUT_OVERRIDE)
     #define YMFM_HAVE_VECTOR_OUTPUT  YMFM_HAVE_VECTOR_OUTPUT_OVERRIDE
