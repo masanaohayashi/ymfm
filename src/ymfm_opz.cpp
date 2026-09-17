@@ -29,6 +29,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ymfm_opz.h"
+#include "ymfm_lfo.h"
 #include "ymfm_fm.ipp"
 
 #define TEMPORARY_DEBUG_PRINTS (0)
@@ -330,37 +331,26 @@ int32_t opz_registers::clock_noise_and_lfo()
 		}
 	}
 
-	// treat the rate as a 4.4 floating-point step value with implied
-	// leading 1; this matches exactly the frequencies in the application
-	// manual, though it might not be implemented exactly this way on chip
-	uint32_t rate0 = lfo_rate();
-	uint32_t rate1 = lfo2_rate();
-	m_lfo_counter[0] += (0x10 | bitfield(rate0, 0, 4)) << bitfield(rate0, 4, 4);
-	m_lfo_counter[1] += (0x10 | bitfield(rate1, 0, 4)) << bitfield(rate1, 4, 4);
-	uint32_t lfo0 = bitfield(m_lfo_counter[0], 22, 8);
-	uint32_t lfo1 = bitfield(m_lfo_counter[1], 22, 8);
+	// Everything below runs the same steps on both LFOs, so it goes to the
+	// kernel as two lanes. The noise value it stamps into the noise waveform
+	// comes from the LFSR above, which is a bit-serial recurrence and stays
+	// where it is.
+	uint32_t const lfo_noise = bitfield(m_noise_lfsr, 17, 8);
+	int16_t const *const wave[2] = { &m_lfo_waveform[lfo_waveform()][0], &m_lfo_waveform[lfo2_waveform()][0] };
+	uint32_t const rate[2] = { lfo_rate(), lfo2_rate() };
+	uint32_t const am_depth[2] = { lfo_am_depth(), lfo2_am_depth() };
+	uint32_t const pm_depth[2] = { lfo_pm_depth(), lfo2_pm_depth() };
 
-	// fill in the noise entry 1 ahead of our current position; this
-	// ensures the current value remains stable for a full LFO clock
-	// and effectively latches the running value when the LFO advances
-	uint32_t lfo_noise = bitfield(m_noise_lfsr, 17, 8);
-	m_lfo_waveform[3][(lfo0 + 1) & 0xff] = lfo_noise | (lfo_noise << 8);
-	m_lfo_waveform[3][(lfo1 + 1) & 0xff] = lfo_noise | (lfo_noise << 8);
-
-	// fetch the AM/PM values based on the waveform; AM is unsigned and
-	// encoded in the low 8 bits, while PM signed and encoded in the upper
-	// 8 bits
-	int32_t ampm0 = m_lfo_waveform[lfo_waveform()][lfo0];
-	int32_t ampm1 = m_lfo_waveform[lfo2_waveform()][lfo1];
-
-	// apply depth to the AM values and store for later
-	m_lfo_am[0] = ((ampm0 & 0xff) * lfo_am_depth()) >> 7;
-	m_lfo_am[1] = ((ampm1 & 0xff) * lfo2_am_depth()) >> 7;
-
-	// apply depth to the PM values and return them combined into two
-	int32_t pm0 = ((ampm0 >> 8) * int32_t(lfo_pm_depth())) >> 7;
-	int32_t pm1 = ((ampm1 >> 8) * int32_t(lfo2_pm_depth())) >> 7;
-	return (pm0 & 0xff) | (pm1 << 8);
+	lfo_block block;
+	block.counter = m_lfo_counter;
+	block.rate = rate;
+	block.wave = wave;
+	block.noise_wave = &m_lfo_waveform[3][0];
+	block.noise_value = lfo_noise | (lfo_noise << 8);
+	block.am_depth = am_depth;
+	block.pm_depth = pm_depth;
+	block.am_out = m_lfo_am;
+	return lfo_clock(block);
 }
 
 
