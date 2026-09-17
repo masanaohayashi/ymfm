@@ -33,6 +33,9 @@
 
 #pragma once
 
+#include "ymfm_eg.h"
+#include "ymfm_fmout.h"
+
 #define YMFM_DEBUG_LOG_WAVFILES (0)
 
 namespace ymfm
@@ -169,7 +172,7 @@ class fm_operator
 
 public:
 	// constructor
-	fm_operator(fm_engine_base<RegisterType> &owner, uint32_t opoffs);
+	fm_operator(fm_engine_base<RegisterType> &owner, uint32_t opnum, uint32_t opoffs);
 
 	// save/restore
 	void save_restore(ymfm_saved_state &state);
@@ -179,6 +182,7 @@ public:
 
 	// return the operator/channel offset
 	uint32_t opoffs() const { return m_opoffs; }
+	uint32_t opnum() const { return m_opnum; }
 	uint32_t choffs() const { return m_choffs; }
 
 	// set the current channel
@@ -206,8 +210,8 @@ public:
 	RegisterType &regs() const { return m_regs; }
 
 	// simple getters for debugging
-	envelope_state debug_eg_state() const { return m_env_state; }
-	uint16_t debug_eg_attenuation() const { return m_env_attenuation; }
+	envelope_state debug_eg_state() const { return envelope_state(m_env_state); }
+	uint16_t debug_eg_attenuation() const { return uint16_t(m_env_attenuation); }
 	uint8_t debug_ssg_inverted() const { return m_ssg_inverted; }
 	opdata_cache &debug_cache() { return m_cache; }
 
@@ -230,9 +234,14 @@ private:
 	// internal state
 	uint32_t m_choffs;                     // channel offset in registers
 	uint32_t m_opoffs;                     // operator offset in registers
-	uint32_t m_phase;                      // current phase value (10.10 format)
-	uint16_t m_env_attenuation;            // computed envelope attenuation (4.6 format)
-	envelope_state m_env_state;            // current envelope state
+	uint32_t m_opnum;                      // index into the engine's parallel arrays
+	uint32_t &m_phase;                     // current phase value (10.10 format), in the engine's array
+	// The envelope lives in the engine's parallel arrays, not here: it updates
+	// every operator each sample and wants a slot's eight channels side by
+	// side. These are views into that storage so the rest of this class reads
+	// unchanged.
+	uint32_t &m_env_attenuation;           // computed envelope attenuation (4.6 format)
+	uint32_t &m_env_state;                 // current envelope state
 	uint8_t m_ssg_inverted;                // non-zero if the output should be inverted (bit 0)
 	uint8_t m_key_state;                   // current key state: on or off (bit 0)
 	uint8_t m_keyon_live;                  // live key on state (bit 0 = direct, bit 1 = rhythm, bit 2 = CSM)
@@ -253,7 +262,7 @@ class fm_channel
 
 public:
 	// constructor
-	fm_channel(fm_engine_base<RegisterType> &owner, uint32_t choffs);
+	fm_channel(fm_engine_base<RegisterType> &owner, uint32_t chnum, uint32_t choffs);
 
 	// save/restore
 	void save_restore(ymfm_saved_state &state);
@@ -263,6 +272,11 @@ public:
 
 	// return the channel offset
 	uint32_t choffs() const { return m_choffs; }
+
+	// feedback access for the vector output stage
+	int32_t feedback_sum() const { return int32_t(m_feedback[0]) + int32_t(m_feedback[1]); }
+	int32_t feedback_in() const { return m_feedback_in; }
+	void set_feedback_in(int32_t value) const { m_feedback_in = int16_t(value); }
 
 	// assign operators
 	void assign(uint32_t index, fm_operator<RegisterType> *op)
@@ -328,6 +342,7 @@ private:
 
 	// internal state
 	uint32_t m_choffs;                     // channel offset in registers
+	uint32_t m_chnum;                      // index into the engine's parallel arrays
 	int16_t m_feedback[2];                 // feedback memory for operator 1
 	mutable int16_t m_feedback_in;         // next input value for op 1 feedback (set in output)
 	std::array<fm_operator<RegisterType> *, 4> m_op; // up to 4 operators
@@ -421,6 +436,14 @@ public:
 	fm_channel<RegisterType> *debug_channel(uint32_t index) const { return m_channel[index].get(); }
 	fm_operator<RegisterType> *debug_operator(uint32_t index) const { return m_operator[index].get(); }
 
+	// views into the parallel envelope state, for fm_operator
+	uint32_t &eg_atten(uint32_t opnum) { return m_eg_atten[opnum]; }
+	uint32_t &eg_state(uint32_t opnum) { return m_eg_state[opnum]; }
+	uint32_t &op_phase(uint32_t opnum) { return m_op_phase[opnum]; }
+	void publish_op_cache(uint32_t opnum, uint32_t opoffs, opdata_cache const &cache);
+	void publish_channel_cache(uint32_t chnum, uint32_t choffs);
+	uint32_t channel_algorithm(uint32_t chnum) const { return m_ch_algorithm[chnum]; }
+
 public:
 	// timer callback; called by the interface when a timer fires
 	virtual void engine_timer_expired(uint32_t tnum) override;
@@ -450,6 +473,43 @@ protected:
 	uint32_t m_active_channels;      // mask of active channels (computed by prepare)
 	uint32_t m_modified_channels;    // mask of channels that have been modified
 	uint32_t m_prepare_count;        // counter to do periodic prepare sweeps
+	// Envelope state as parallel arrays, one entry per operator, rounded up so
+	// the vector path can always take eight at a time. Operator numbering puts
+	// a slot's eight channels in eight consecutive entries.
+	static constexpr uint32_t EG_COUNT = (OPERATORS + 7) & ~7u;
+	static constexpr uint32_t CH_COUNT = (CHANNELS + 7) & ~7u;
+	alignas(16) uint32_t m_op_phase[EG_COUNT];        // 10.10 phase
+	alignas(16) uint32_t m_eg_atten[EG_COUNT];
+	alignas(16) uint32_t m_eg_state[EG_COUNT];
+	alignas(16) uint32_t m_eg_sustain[EG_COUNT];
+	alignas(16) uint32_t m_eg_cur_rate[EG_COUNT];    // rate for the current state
+	alignas(16) uint32_t m_eg_cur_inc[EG_COUNT];     // packed increments for it
+	alignas(16) uint32_t m_eg_rate[EG_STATES][EG_COUNT];
+	alignas(16) uint32_t m_eg_inc[EG_STATES][EG_COUNT];
+
+	// Per-operator and per-channel values the output stage needs, decoded when
+	// the registers change rather than re-extracted from the register bytes
+	// for every channel on every sample.
+	alignas(16) uint32_t m_op_eg_shift[EG_COUNT];
+	alignas(16) uint32_t m_op_total_level[EG_COUNT];
+	alignas(16) uint32_t m_op_am_mask[EG_COUNT];     // all ones when AM applies
+	uint16_t const *m_op_waveform[EG_COUNT];
+	alignas(16) uint32_t m_ch_fb_shift[CH_COUNT];    // 10 - feedback
+	alignas(16) uint32_t m_ch_fb_mask[CH_COUNT];     // zero when feedback is off
+	alignas(16) uint32_t m_ch_algorithm[CH_COUNT];   // packed algorithm word
+	alignas(16) uint32_t m_ch_out0_mask[CH_COUNT];
+	alignas(16) uint32_t m_ch_out1_mask[CH_COUNT];
+
+	// Scratch for the vector output stage, refilled each sample. Mutable
+	// because output() is const, like the feedback value it carries.
+	alignas(16) mutable uint32_t m_ch_am_offset[CH_COUNT];
+	alignas(16) mutable uint32_t m_ch_active[CH_COUNT];
+	alignas(16) mutable uint32_t m_ch_contributes[CH_COUNT];
+	alignas(16) mutable int32_t m_ch_feedback_sum[CH_COUNT];
+	alignas(16) mutable int32_t m_ch_feedback_io[CH_COUNT];
+	uint32_t m_slot_base[4];
+	bool m_vector_output_ok;         // operator numbering suits the vector path
+	bool m_vector_output_now;        // and the current register state allows it
 	RegisterType m_regs;             // register accessor
 	std::unique_ptr<fm_channel<RegisterType>> m_channel[CHANNELS]; // channel pointers
 	std::unique_ptr<fm_operator<RegisterType>> m_operator[OPERATORS]; // operator pointers

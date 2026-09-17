@@ -85,52 +85,45 @@ inline uint32_t abs_sin_attenuation(uint32_t input)
 
 inline uint32_t attenuation_to_volume(uint32_t input)
 {
-	// the values here are 10-bit mantissas with an implied leading bit
-	// this matches the internal format of the OPN chip, extracted from the die
+	// look up the fractional part, then shift by the whole; the table is
+	// shared with the vector output stage, which needs it from another file
+	return g_power_table[input & 0xff] >> (input >> 8);
+}
 
-	// as a nod to performance, the implicit 0x400 bit is pre-incorporated, and
-	// the values are left-shifted by 2 so that a simple right shift is all that
-	// is needed; also the order is reversed to save a NOT on the input
-#define X(a) (((a) | 0x400) << 2)
-	static uint16_t const s_power_table[256] =
+
+//-------------------------------------------------
+//  algorithm_ops_for - return the packed wiring
+//  description for one algorithm
+//
+//      ---------x use opout[x] as operator 2 input
+//      ------xxx- use opout[x] as operator 3 input
+//      ---xxx---- use opout[x] as operator 4 input
+//      --x------- include opout[1] in final sum
+//      -x-------- include opout[2] in final sum
+//      x--------- include opout[3] in final sum
+//-------------------------------------------------
+
+inline uint32_t algorithm_ops_for(uint32_t algorithm)
+{
+#define ALGORITHM(op2in, op3in, op4in, op1out, op2out, op3out) \
+	((op2in) | ((op3in) << 1) | ((op4in) << 4) | ((op1out) << 7) | ((op2out) << 8) | ((op3out) << 9))
+	static uint16_t const s_algorithm_ops[8+4] =
 	{
-		X(0x3fa),X(0x3f5),X(0x3ef),X(0x3ea),X(0x3e4),X(0x3df),X(0x3da),X(0x3d4),
-		X(0x3cf),X(0x3c9),X(0x3c4),X(0x3bf),X(0x3b9),X(0x3b4),X(0x3ae),X(0x3a9),
-		X(0x3a4),X(0x39f),X(0x399),X(0x394),X(0x38f),X(0x38a),X(0x384),X(0x37f),
-		X(0x37a),X(0x375),X(0x370),X(0x36a),X(0x365),X(0x360),X(0x35b),X(0x356),
-		X(0x351),X(0x34c),X(0x347),X(0x342),X(0x33d),X(0x338),X(0x333),X(0x32e),
-		X(0x329),X(0x324),X(0x31f),X(0x31a),X(0x315),X(0x310),X(0x30b),X(0x306),
-		X(0x302),X(0x2fd),X(0x2f8),X(0x2f3),X(0x2ee),X(0x2e9),X(0x2e5),X(0x2e0),
-		X(0x2db),X(0x2d6),X(0x2d2),X(0x2cd),X(0x2c8),X(0x2c4),X(0x2bf),X(0x2ba),
-		X(0x2b5),X(0x2b1),X(0x2ac),X(0x2a8),X(0x2a3),X(0x29e),X(0x29a),X(0x295),
-		X(0x291),X(0x28c),X(0x288),X(0x283),X(0x27f),X(0x27a),X(0x276),X(0x271),
-		X(0x26d),X(0x268),X(0x264),X(0x25f),X(0x25b),X(0x257),X(0x252),X(0x24e),
-		X(0x249),X(0x245),X(0x241),X(0x23c),X(0x238),X(0x234),X(0x230),X(0x22b),
-		X(0x227),X(0x223),X(0x21e),X(0x21a),X(0x216),X(0x212),X(0x20e),X(0x209),
-		X(0x205),X(0x201),X(0x1fd),X(0x1f9),X(0x1f5),X(0x1f0),X(0x1ec),X(0x1e8),
-		X(0x1e4),X(0x1e0),X(0x1dc),X(0x1d8),X(0x1d4),X(0x1d0),X(0x1cc),X(0x1c8),
-		X(0x1c4),X(0x1c0),X(0x1bc),X(0x1b8),X(0x1b4),X(0x1b0),X(0x1ac),X(0x1a8),
-		X(0x1a4),X(0x1a0),X(0x19c),X(0x199),X(0x195),X(0x191),X(0x18d),X(0x189),
-		X(0x185),X(0x181),X(0x17e),X(0x17a),X(0x176),X(0x172),X(0x16f),X(0x16b),
-		X(0x167),X(0x163),X(0x160),X(0x15c),X(0x158),X(0x154),X(0x151),X(0x14d),
-		X(0x149),X(0x146),X(0x142),X(0x13e),X(0x13b),X(0x137),X(0x134),X(0x130),
-		X(0x12c),X(0x129),X(0x125),X(0x122),X(0x11e),X(0x11b),X(0x117),X(0x114),
-		X(0x110),X(0x10c),X(0x109),X(0x106),X(0x102),X(0x0ff),X(0x0fb),X(0x0f8),
-		X(0x0f4),X(0x0f1),X(0x0ed),X(0x0ea),X(0x0e7),X(0x0e3),X(0x0e0),X(0x0dc),
-		X(0x0d9),X(0x0d6),X(0x0d2),X(0x0cf),X(0x0cc),X(0x0c8),X(0x0c5),X(0x0c2),
-		X(0x0be),X(0x0bb),X(0x0b8),X(0x0b5),X(0x0b1),X(0x0ae),X(0x0ab),X(0x0a8),
-		X(0x0a4),X(0x0a1),X(0x09e),X(0x09b),X(0x098),X(0x094),X(0x091),X(0x08e),
-		X(0x08b),X(0x088),X(0x085),X(0x082),X(0x07e),X(0x07b),X(0x078),X(0x075),
-		X(0x072),X(0x06f),X(0x06c),X(0x069),X(0x066),X(0x063),X(0x060),X(0x05d),
-		X(0x05a),X(0x057),X(0x054),X(0x051),X(0x04e),X(0x04b),X(0x048),X(0x045),
-		X(0x042),X(0x03f),X(0x03c),X(0x039),X(0x036),X(0x033),X(0x030),X(0x02d),
-		X(0x02a),X(0x028),X(0x025),X(0x022),X(0x01f),X(0x01c),X(0x019),X(0x016),
-		X(0x014),X(0x011),X(0x00e),X(0x00b),X(0x008),X(0x006),X(0x003),X(0x000)
+		ALGORITHM(1,2,3, 0,0,0),    //  0: O1 -> O2 -> O3 -> O4 -> out (O4)
+		ALGORITHM(0,5,3, 0,0,0),    //  1: (O1 + O2) -> O3 -> O4 -> out (O4)
+		ALGORITHM(0,2,6, 0,0,0),    //  2: (O1 + (O2 -> O3)) -> O4 -> out (O4)
+		ALGORITHM(1,0,7, 0,0,0),    //  3: ((O1 -> O2) + O3) -> O4 -> out (O4)
+		ALGORITHM(1,0,3, 0,1,0),    //  4: ((O1 -> O2) + (O3 -> O4)) -> out (O2+O4)
+		ALGORITHM(1,1,1, 0,1,1),    //  5: ((O1 -> O2) + (O1 -> O3) + (O1 -> O4)) -> out (O2+O3+O4)
+		ALGORITHM(1,0,0, 0,1,1),    //  6: ((O1 -> O2) + O3 + O4) -> out (O2+O3+O4)
+		ALGORITHM(0,0,0, 1,1,1),    //  7: (O1 + O2 + O3 + O4) -> out (O1+O2+O3+O4)
+		ALGORITHM(1,2,3, 0,0,0),    //  8: O1 -> O2 -> O3 -> O4 -> out (O4)         [same as 0]
+		ALGORITHM(0,2,3, 1,0,0),    //  9: (O1 + (O2 -> O3 -> O4)) -> out (O1+O4)   [unique]
+		ALGORITHM(1,0,3, 0,1,0),    // 10: ((O1 -> O2) + (O3 -> O4)) -> out (O2+O4) [same as 4]
+		ALGORITHM(0,2,0, 1,0,1)     // 11: (O1 + (O2 -> O3) + O4) -> out (O1+O3+O4) [unique]
 	};
-#undef X
-
-	// look up the fractional part, then shift by the whole
-	return s_power_table[input & 0xff] >> (input >> 8);
+#undef ALGORITHM
+	return s_algorithm_ops[algorithm];
 }
 
 
@@ -142,7 +135,7 @@ inline uint32_t attenuation_to_volume(uint32_t input)
 //  fractional scale factor to decrease by)
 //-------------------------------------------------
 
-inline uint32_t attenuation_increment(uint32_t rate, uint32_t index)
+inline uint32_t attenuation_increment_packed(uint32_t rate)
 {
 	static uint32_t const s_increment_table[64] =
 	{
@@ -163,7 +156,12 @@ inline uint32_t attenuation_increment(uint32_t rate, uint32_t index)
 		0x44444444, 0x84448444, 0x84848484, 0x88848884,  // 56-59  (0x38-0x3B)
 		0x88888888, 0x88888888, 0x88888888, 0x88888888   // 60-63  (0x3C-0x3F)
 	};
-	return bitfield(s_increment_table[rate], 4*index, 4);
+	return s_increment_table[rate];
+}
+
+inline uint32_t attenuation_increment(uint32_t rate, uint32_t index)
+{
+	return bitfield(attenuation_increment_packed(rate), 4*index, 4);
 }
 
 
@@ -371,18 +369,22 @@ inline int32_t opn_lfo_pm_phase_adjustment(uint32_t fnum_bits, uint32_t pm_sensi
 //-------------------------------------------------
 
 template<class RegisterType>
-fm_operator<RegisterType>::fm_operator(fm_engine_base<RegisterType> &owner, uint32_t opoffs) :
+fm_operator<RegisterType>::fm_operator(fm_engine_base<RegisterType> &owner, uint32_t opnum, uint32_t opoffs) :
 	m_choffs(0),
 	m_opoffs(opoffs),
-	m_phase(0),
-	m_env_attenuation(0x3ff),
-	m_env_state(EG_RELEASE),
+	m_opnum(opnum),
+	m_phase(owner.op_phase(opnum)),
+	m_env_attenuation(owner.eg_atten(opnum)),
+	m_env_state(owner.eg_state(opnum)),
 	m_ssg_inverted(false),
 	m_key_state(0),
 	m_keyon_live(0),
 	m_regs(owner.regs()),
 	m_owner(owner)
 {
+	m_phase = 0;
+	m_env_attenuation = 0x3ff;
+	m_env_state = EG_RELEASE;
 }
 
 
@@ -411,8 +413,15 @@ template<class RegisterType>
 void fm_operator<RegisterType>::save_restore(ymfm_saved_state &state)
 {
 	state.save_restore(m_phase);
-	state.save_restore(m_env_attenuation);
-	state.save_restore(m_env_state);
+
+	// round-trip through the original types: the storage changed, the snapshot
+	// format must not
+	uint16_t attenuation = uint16_t(m_env_attenuation);
+	state.save_restore(attenuation);
+	m_env_attenuation = attenuation;
+	envelope_state eg = envelope_state(m_env_state);
+	state.save_restore(eg);
+	m_env_state = eg;
 	state.save_restore(m_ssg_inverted);
 	state.save_restore(m_key_state);
 	state.save_restore(m_keyon_live);
@@ -433,6 +442,11 @@ bool fm_operator<RegisterType>::prepare()
 	clock_keystate(uint32_t(m_keyon_live != 0));
 	m_keyon_live &= ~(1 << KEYON_CSM);
 
+	// mirror the cache into the engine's parallel arrays, after any key-on has
+	// settled the state; the envelope update carries the current rate rather
+	// than looking it up per sample, so it is refreshed here too
+	m_owner.publish_op_cache(m_opnum, m_opoffs, m_cache);
+
 	// we're active until we're quiet after the release
 	return (m_env_state != (RegisterType::EG_HAS_REVERB ? EG_REVERB : EG_RELEASE) || m_env_attenuation < EG_QUIET);
 }
@@ -445,15 +459,24 @@ bool fm_operator<RegisterType>::prepare()
 template<class RegisterType>
 void fm_operator<RegisterType>::clock(uint32_t env_counter, int32_t lfo_raw_pm)
 {
-	// clock the SSG-EG state (OPN/OPNA)
-	if (m_regs.op_ssg_eg_enable(m_opoffs))
-		clock_ssg_eg_state();
+	// Families with SSG-EG keep the per-operator envelope here, because
+	// clock_ssg_eg_state can rewrite the phase and attenuation before it and
+	// so cannot be hoisted. Everyone else has their envelopes clocked for the
+	// whole chip at once by the engine, eight operators at a time.
+	if (RegisterType::EG_HAS_SSG)
+	{
+		// clock the SSG-EG state (OPN/OPNA)
+		if (m_regs.op_ssg_eg_enable(m_opoffs))
+			clock_ssg_eg_state();
+		else
+			m_ssg_inverted = false;
+
+		// clock the envelope if on an envelope cycle; env_counter is a x.2 value
+		if (bitfield(env_counter, 0, 2) == 0)
+			clock_envelope(env_counter >> 2);
+	}
 	else
 		m_ssg_inverted = false;
-
-	// clock the envelope if on an envelope cycle; env_counter is a x.2 value
-	if (bitfield(env_counter, 0, 2) == 0)
-		clock_envelope(env_counter >> 2);
 
 	// clock the phase
 	clock_phase(lfo_raw_pm);
@@ -674,69 +697,74 @@ void fm_operator<RegisterType>::clock_ssg_eg_state()
 template<class RegisterType>
 void fm_operator<RegisterType>::clock_envelope(uint32_t env_counter)
 {
-	// handle attack->decay transitions
-	if (m_env_state == EG_ATTACK && m_env_attenuation == 0)
-		m_env_state = EG_DECAY;
+	// Written as conditional assignment rather than control flow: this is the
+	// hottest function in the core and the 8-channel SIMD form has to evaluate
+	// both arms of every one of these anyway. Keeping the scalar version in the
+	// same shape means the two can be read side by side, and the scalar one
+	// stays the bit-exact reference for the vector one.
 
-	// handle decay->sustain transitions; it is important to do this immediately
-	// after the attack->decay transition above in the event that the sustain level
-	// is set to 0 (in which case we will skip right to sustain without doing any
-	// decay); as an example where this can be heard, check the cymbals sound
-	// in channel 0 of shinobi's test mode sound #5
-	if (m_env_state == EG_DECAY && m_env_attenuation >= m_cache.eg_sustain)
-		m_env_state = EG_SUSTAIN;
+	// handle attack->decay transitions, then decay->sustain; the second must
+	// see the result of the first, because a sustain level of 0 skips decay
+	// entirely (audible on the cymbals in channel 0 of shinobi's test sound #5)
+	uint32_t state = m_env_state;
+	state = (state == EG_ATTACK && m_env_attenuation == 0) ? uint32_t(EG_DECAY) : state;
+	state = (state == EG_DECAY && m_env_attenuation >= m_cache.eg_sustain) ? uint32_t(EG_SUSTAIN) : state;
 
-	// fetch the appropriate 6-bit rate value from the cache
-	uint32_t rate = m_cache.eg_rate[m_env_state];
+	// fetch the appropriate 6-bit rate value from the cache; the vector form
+	// selects among one array per state instead of indexing, since a per-lane
+	// indexed load would be a gather
+	uint32_t rate = m_cache.eg_rate[state];
 
 	// compute the rate shift value; this is the shift needed to
 	// apply to the env_counter such that it becomes a 5.11 fixed
 	// point number
 	uint32_t rate_shift = rate >> 2;
-	env_counter <<= rate_shift;
+	uint32_t shifted_counter = env_counter << rate_shift;
 
-	// see if the fractional part is 0; if not, it's not time to clock
-	if (bitfield(env_counter, 0, 11) != 0)
-		return;
+	// the fractional part being non-zero means it is not time to clock; this
+	// was an early return, and becomes the mask the whole update is under
+	const bool clocking = bitfield(shifted_counter, 0, 11) == 0;
 
-	// determine the increment based on the non-fractional part of env_counter
-	uint32_t relevant_bits = bitfield(env_counter, (rate_shift <= 11) ? 11 : rate_shift, 3);
+	// determine the increment based on the non-fractional part of env_counter;
+	// the original ternary is just a max, which has no branch
+	uint32_t relevant_bits = bitfield(shifted_counter, std::max<uint32_t>(rate_shift, 11), 3);
 	uint32_t increment = attenuation_increment(rate, relevant_bits);
 
-	// attack is the only one that increases
-	if (m_env_state == EG_ATTACK)
-	{
-		// glitch means that attack rates of 62/63 don't increment if
-		// changed after the initial key on (where they are handled
-		// specially); nukeykt confirms this happens on OPM, OPN, OPL/OPLL
-		// at least so assuming it is true for everyone
-		if (rate < 62)
-			m_env_attenuation += (~m_env_attenuation * increment) >> 4;
-	}
+	// attack is the only one that increases. The glitch means attack rates of
+	// 62/63 do not increment if changed after the initial key on (where they
+	// are handled specially); nukeykt confirms this happens on OPM, OPN and
+	// OPL/OPLL at least, so assume it is true for everyone.
+	const uint32_t attack_delta = (rate < 62)
+		? ((~uint32_t(m_env_attenuation) * increment) >> 4) : 0u;
+	const uint32_t attacked = uint16_t(uint32_t(m_env_attenuation) + attack_delta);
 
-	// all other cases are similar
+	// all other cases are similar: non-SSG-EG applies the increment, SSG-EG
+	// only below the mid-point and then at 4x, and the result is clamped
+	uint32_t decayed = m_env_attenuation;
+	if (RegisterType::EG_HAS_SSG && m_regs.op_ssg_eg_enable(m_opoffs))
+		decayed += (m_env_attenuation < 0x200) ? 4 * increment : 0u;
 	else
-	{
-		// non-SSG-EG cases just apply the increment
-		if (!m_regs.op_ssg_eg_enable(m_opoffs))
-			m_env_attenuation += increment;
+		decayed += increment;
+	decayed = (decayed >= 0x400) ? 0x3ffu : decayed;
 
-		// SSG-EG only applies if less than mid-point, and then at 4x
-		else if (m_env_attenuation < 0x200)
-			m_env_attenuation += 4 * increment;
+	const bool attacking = (state == EG_ATTACK);
+	const uint32_t updated = attacking ? attacked : decayed;
+	m_env_attenuation = uint16_t(clocking ? updated : uint32_t(m_env_attenuation));
 
-		// clamp the final attenuation
-		if (m_env_attenuation >= 0x400)
-			m_env_attenuation = 0x3ff;
+	// transition from release to reverb, should switch at -18dB; only
+	// reachable from the non-attack arm, so testing the state is enough
+	if (RegisterType::EG_HAS_REVERB && clocking && state == EG_RELEASE
+		&& m_env_attenuation >= 0xc0)
+		state = EG_REVERB;
 
-		// transition from depress to attack
-		if (RegisterType::EG_HAS_DEPRESS && m_env_state == EG_DEPRESS && m_env_attenuation >= 0x200)
-			start_attack();
+	m_env_state = envelope_state(state);
 
-		// transition from release to reverb, should switch at -18dB
-		if (RegisterType::EG_HAS_REVERB && m_env_state == EG_RELEASE && m_env_attenuation >= 0xc0)
-			m_env_state = EG_REVERB;
-	}
+	// transition from depress to attack; start_attack() has side effects
+	// beyond the envelope, so it stays real control flow. It folds away
+	// entirely for families without a depress state.
+	if (RegisterType::EG_HAS_DEPRESS && clocking && !attacking
+		&& m_env_state == EG_DEPRESS && m_env_attenuation >= 0x200)
+		start_attack();
 }
 
 
@@ -795,8 +823,9 @@ uint32_t fm_operator<RegisterType>::envelope_attenuation(uint32_t am_offset) con
 //-------------------------------------------------
 
 template<class RegisterType>
-fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32_t choffs) :
+fm_channel<RegisterType>::fm_channel(fm_engine_base<RegisterType> &owner, uint32_t chnum, uint32_t choffs) :
 	m_choffs(choffs),
+	m_chnum(chnum),
 	m_feedback{ 0, 0 },
 	m_feedback_in(0),
 	m_op{ nullptr, nullptr, nullptr, nullptr },
@@ -858,6 +887,8 @@ template<class RegisterType>
 bool fm_channel<RegisterType>::prepare()
 {
 	uint32_t active_mask = 0;
+
+	m_owner.publish_channel_cache(m_chnum, m_choffs);
 
 	// prepare all operators and determine if they are active
 	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
@@ -1014,24 +1045,7 @@ void fm_channel<RegisterType>::output_4op(output_data &output, uint32_t rshift, 
 	//      --x------- include opout[1] in final sum
 	//      -x-------- include opout[2] in final sum
 	//      x--------- include opout[3] in final sum
-	#define ALGORITHM(op2in, op3in, op4in, op1out, op2out, op3out) \
-		((op2in) | ((op3in) << 1) | ((op4in) << 4) | ((op1out) << 7) | ((op2out) << 8) | ((op3out) << 9))
-	static uint16_t const s_algorithm_ops[8+4] =
-	{
-		ALGORITHM(1,2,3, 0,0,0),    //  0: O1 -> O2 -> O3 -> O4 -> out (O4)
-		ALGORITHM(0,5,3, 0,0,0),    //  1: (O1 + O2) -> O3 -> O4 -> out (O4)
-		ALGORITHM(0,2,6, 0,0,0),    //  2: (O1 + (O2 -> O3)) -> O4 -> out (O4)
-		ALGORITHM(1,0,7, 0,0,0),    //  3: ((O1 -> O2) + O3) -> O4 -> out (O4)
-		ALGORITHM(1,0,3, 0,1,0),    //  4: ((O1 -> O2) + (O3 -> O4)) -> out (O2+O4)
-		ALGORITHM(1,1,1, 0,1,1),    //  5: ((O1 -> O2) + (O1 -> O3) + (O1 -> O4)) -> out (O2+O3+O4)
-		ALGORITHM(1,0,0, 0,1,1),    //  6: ((O1 -> O2) + O3 + O4) -> out (O2+O3+O4)
-		ALGORITHM(0,0,0, 1,1,1),    //  7: (O1 + O2 + O3 + O4) -> out (O1+O2+O3+O4)
-		ALGORITHM(1,2,3, 0,0,0),    //  8: O1 -> O2 -> O3 -> O4 -> out (O4)         [same as 0]
-		ALGORITHM(0,2,3, 1,0,0),    //  9: (O1 + (O2 -> O3 -> O4)) -> out (O1+O4)   [unique]
-		ALGORITHM(1,0,3, 0,1,0),    // 10: ((O1 -> O2) + (O3 -> O4)) -> out (O2+O4) [same as 4]
-		ALGORITHM(0,2,0, 1,0,1)     // 11: (O1 + (O2 -> O3) + O4) -> out (O1+O3+O4) [unique]
-	};
-	uint32_t algorithm_ops = s_algorithm_ops[m_regs.ch_algorithm(m_choffs)];
+	uint32_t algorithm_ops = m_owner.channel_algorithm(m_chnum);
 
 	// populate the opout table
 	int16_t opout[8];
@@ -1193,13 +1207,34 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	// inform the interface of their engine
 	m_intf.m_engine = this;
 
+	// the envelope arrays are read as whole eight-operator groups, so the
+	// padding past the real operator count has to be defined
+	std::memset(m_op_phase, 0, sizeof(m_op_phase));
+	std::memset(m_op_eg_shift, 0, sizeof(m_op_eg_shift));
+	std::memset(m_op_total_level, 0, sizeof(m_op_total_level));
+	std::memset(m_op_am_mask, 0, sizeof(m_op_am_mask));
+	std::memset(m_ch_fb_shift, 0, sizeof(m_ch_fb_shift));
+	std::memset(m_ch_fb_mask, 0, sizeof(m_ch_fb_mask));
+	std::memset(m_ch_algorithm, 0, sizeof(m_ch_algorithm));
+	std::memset(m_ch_out0_mask, 0, sizeof(m_ch_out0_mask));
+	std::memset(m_ch_out1_mask, 0, sizeof(m_ch_out1_mask));
+	for (uint32_t opnum = 0; opnum < EG_COUNT; opnum++)
+		m_op_waveform[opnum] = nullptr;
+	std::memset(m_eg_atten, 0, sizeof(m_eg_atten));
+	std::memset(m_eg_state, 0, sizeof(m_eg_state));
+	std::memset(m_eg_sustain, 0, sizeof(m_eg_sustain));
+	std::memset(m_eg_cur_rate, 0, sizeof(m_eg_cur_rate));
+	std::memset(m_eg_cur_inc, 0, sizeof(m_eg_cur_inc));
+	std::memset(m_eg_rate, 0, sizeof(m_eg_rate));
+	std::memset(m_eg_inc, 0, sizeof(m_eg_inc));
+
 	// create the channels
 	for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
-		m_channel[chnum] = std::make_unique<fm_channel<RegisterType>>(*this, RegisterType::channel_offset(chnum));
+		m_channel[chnum] = std::make_unique<fm_channel<RegisterType>>(*this, chnum, RegisterType::channel_offset(chnum));
 
 	// create the operators
 	for (uint32_t opnum = 0; opnum < OPERATORS; opnum++)
-		m_operator[opnum] = std::make_unique<fm_operator<RegisterType>>(*this, RegisterType::operator_offset(opnum));
+		m_operator[opnum] = std::make_unique<fm_operator<RegisterType>>(*this, opnum, RegisterType::operator_offset(opnum));
 
 #if (YMFM_DEBUG_LOG_WAVFILES)
 	for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
@@ -1208,6 +1243,53 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 
 	// do the initial operator assignment
 	assign_operators();
+}
+
+
+//-------------------------------------------------
+//  publish_eg_cache - mirror one operator's
+//  envelope cache into the parallel arrays
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_engine_base<RegisterType>::publish_op_cache(uint32_t opnum, uint32_t opoffs, opdata_cache const &cache)
+{
+	m_eg_sustain[opnum] = cache.eg_sustain;
+	for (uint32_t state = 0; state < EG_STATES; state++)
+	{
+		uint32_t const rate = cache.eg_rate[state];
+		m_eg_rate[state][opnum] = rate;
+		// the increment table is eight 4-bit values packed into one word and
+		// depends only on the rate, so resolve it here instead of indexing a
+		// table per operator per sample
+		m_eg_inc[state][opnum] = attenuation_increment_packed(rate);
+	}
+	uint32_t const current = m_eg_state[opnum];
+	m_eg_cur_rate[opnum] = m_eg_rate[current][opnum];
+	m_eg_cur_inc[opnum] = m_eg_inc[current][opnum];
+
+	m_op_eg_shift[opnum] = cache.eg_shift;
+	m_op_total_level[opnum] = cache.total_level;
+	m_op_am_mask[opnum] = m_regs.op_lfo_am_enable(opoffs) ? 0xffffffffu : 0u;
+	m_op_waveform[opnum] = cache.waveform;
+}
+
+
+//-------------------------------------------------
+//  publish_channel_cache - decode the per-channel
+//  register fields the output stage reads
+//-------------------------------------------------
+
+template<class RegisterType>
+void fm_engine_base<RegisterType>::publish_channel_cache(uint32_t chnum, uint32_t choffs)
+{
+	uint32_t const feedback = m_regs.ch_feedback(choffs);
+	// feedback of 0 means no feedback at all, not a shift of 10
+	m_ch_fb_shift[chnum] = 10 - feedback;
+	m_ch_fb_mask[chnum] = (feedback != 0) ? 0xffffffffu : 0u;
+	m_ch_algorithm[chnum] = algorithm_ops_for(m_regs.ch_algorithm(choffs));
+	m_ch_out0_mask[chnum] = m_regs.ch_output_0(choffs) ? 0xffffffffu : 0u;
+	m_ch_out1_mask[chnum] = m_regs.ch_output_1(choffs) ? 0xffffffffu : 0u;
 }
 
 
@@ -1297,6 +1379,15 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 				if (m_channel[chnum]->prepare())
 					m_active_channels |= 1 << chnum;
 
+		// Whether the vector output stage applies depends only on the
+		// registers, so decide it here rather than on every sample. Noise
+		// steals channel 7's fourth operator, and a two-operator channel has a
+		// different shape.
+		m_vector_output_now = m_vector_output_ok && m_regs.noise_enable() == 0;
+		for (uint32_t chnum = 0; chnum < CHANNELS && m_vector_output_now; chnum++)
+			if (!m_channel[chnum]->is4op())
+				m_vector_output_now = false;
+
 		// reset the modified channels and prepare count
 		m_modified_channels = m_prepare_count = 0;
 	}
@@ -1310,6 +1401,23 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 
 	// clock the noise generator
 	int32_t lfo_raw_pm = m_regs.clock_noise_and_lfo();
+
+	// clock every operator's envelope in one pass; the per-operator path is
+	// only used by families whose SSG-EG stage has to run in between
+	if (!RegisterType::EG_HAS_SSG && bitfield(m_env_counter, 0, 2) == 0)
+	{
+		eg_block block;
+		block.atten = m_eg_atten;
+		block.state = m_eg_state;
+		block.sustain = m_eg_sustain;
+		block.cur_rate = m_eg_cur_rate;
+		block.cur_inc = m_eg_cur_inc;
+		block.rate_of = &m_eg_rate[0][0];
+		block.inc_of = &m_eg_inc[0][0];
+		block.count = EG_COUNT;
+		block.has_reverb = RegisterType::EG_HAS_REVERB;
+		eg_clock(block, m_env_counter >> 2);
+	}
 
 	// now update the state of all the channels and operators
 	for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
@@ -1372,6 +1480,56 @@ void fm_engine_base<RegisterType>::output(output_data &output, uint32_t rshift, 
 	}
 	else
 	{
+#if YMFM_HAVE_VECTOR_OUTPUT
+		// Eight channels at once. Noise steals channel 7's fourth operator and
+		// a two-operator channel has a different shape, so either sends this
+		// sample down the per-channel path instead.
+		if (m_vector_output_now && rshift == 0 && !YMFM_DEBUG_LOG_WAVFILES)
+		{
+			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+			{
+				uint32_t const choffs = m_channel[chnum]->choffs();
+				bool const clocked = bitfield(chanmask, chnum) != 0;
+				m_ch_am_offset[chnum] = m_regs.lfo_am_offset(choffs);
+				m_ch_active[chnum] = clocked ? 0xffffffffu : 0u;
+				m_ch_contributes[chnum] =
+					(clocked && m_regs.ch_output_any(choffs) != 0) ? 0xffffffffu : 0u;
+				m_ch_feedback_sum[chnum] = m_channel[chnum]->feedback_sum();
+				m_ch_feedback_io[chnum] = m_channel[chnum]->feedback_in();
+			}
+
+			fm_output_block block;
+			block.phase = m_op_phase;
+			block.env_atten = m_eg_atten;
+			block.eg_shift = m_op_eg_shift;
+			block.total_level = m_op_total_level;
+			block.am_mask = m_op_am_mask;
+			block.waveform = m_op_waveform;
+			block.slot_base = m_slot_base;
+			block.am_offset = m_ch_am_offset;
+			block.fb_shift = m_ch_fb_shift;
+			block.fb_mask = m_ch_fb_mask;
+			block.feedback_sum = m_ch_feedback_sum;
+			block.feedback_io = m_ch_feedback_io;
+			block.active = m_ch_active;
+			block.algorithm = m_ch_algorithm;
+			block.out0_mask = m_ch_out0_mask;
+			block.out1_mask = m_ch_out1_mask;
+			block.contributes = m_ch_contributes;
+			block.clipmax = clipmax;
+
+			int32_t out0 = output.data[0];
+			int32_t out1 = output.data[1 % RegisterType::OUTPUTS];
+			fm_output_4op_x8(block, out0, out1);
+			output.data[0] = out0;
+			output.data[1 % RegisterType::OUTPUTS] = out1;
+
+			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+				m_channel[chnum]->set_feedback_in(m_ch_feedback_io[chnum]);
+			return;
+		}
+#endif
+
 		// sum over all the desired channels
 		for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
 			if (bitfield(chanmask, chnum))
@@ -1462,6 +1620,21 @@ void fm_engine_base<RegisterType>::assign_operators()
 			uint32_t opnum = bitfield(map.chan[chnum], 8 * index, 8);
 			m_channel[chnum]->assign(index, (opnum == 0xff) ? nullptr : m_operator[opnum].get());
 		}
+
+	// The vector output stage indexes operators as "slot base plus channel",
+	// so it only applies when the mapping really is laid out that way and the
+	// chip is eight stereo four-operator channels. Checked rather than
+	// assumed, because the mapping is per-family.
+	m_vector_output_now = false;
+	m_vector_output_ok = (CHANNELS == 8 && RegisterType::OUTPUTS == 2);
+	for (uint32_t index = 0; index < 4 && m_vector_output_ok; index++)
+	{
+		uint32_t const first = bitfield(map.chan[0], 8 * index, 8);
+		m_slot_base[index] = first;
+		for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+			if (bitfield(map.chan[chnum], 8 * index, 8) != first + chnum)
+				m_vector_output_ok = false;
+	}
 }
 
 
