@@ -185,8 +185,7 @@ public:
 
 	// recompute every operator's phase step for this sample; same result as
 	// compute_phase_step, for the whole chip at once
-	bool all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t const *block_freq,
-		uint32_t const *detune, uint32_t const *multiple, uint32_t *step);
+	bool all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t *step);
 
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
@@ -285,6 +284,23 @@ protected:
 	uint8_t m_lfo_am[2];                  // current LFO AM value
 	uint8_t m_regdata[REGISTERS];         // register data
 	uint32_t m_phase_substep[OPERATORS];  // phase substep for fixed frequency
+
+	// Everything the per-sample phase step needs, decoded when the registers
+	// change rather than re-extracted for every operator on every sample. The
+	// per-channel entries are indexed by channel, which for a slot of eight
+	// operators is the same eight entries every time.
+	alignas(16) uint32_t m_step_eff_base[OPERATORS];  // keycode with the gaps removed
+	alignas(16) uint32_t m_step_octave[OPERATORS];
+	alignas(16) uint32_t m_step_delta[OPERATORS];     // coarse detune, in 1/64ths
+	alignas(16) uint32_t m_step_detune[OPERATORS];    // detune by keycode
+	alignas(16) uint32_t m_step_multiple[OPERATORS];  // frequency multiplier, x.4
+	alignas(16) uint32_t m_step_fix_mask[OPERATORS];  // all ones in fixed-frequency mode
+	alignas(16) uint32_t m_step_fix_rate[OPERATORS];  // 75 * the fixed frequency
+	alignas(16) uint32_t m_step_pm_shift[CHANNELS];   // signed, negative shifts right
+	alignas(16) uint32_t m_step_pm_live[CHANNELS];    // zero where sensitivity is zero
+	alignas(16) uint32_t m_step_pm2_shift[CHANNELS];
+	alignas(16) uint32_t m_step_pm2_live[CHANNELS];
+	uint32_t m_fix_bits;                  // one bit per operator in fixed-frequency mode
 	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms
 };
@@ -303,10 +319,9 @@ constexpr bool write_is_pure<opz_registers>(uint16_t regnum) { return regnum != 
 // operators, and both offsets are the plain index, so every register the step
 // needs loads as eight consecutive bytes with nothing to gather.
 template<>
-inline bool dynamic_phase_steps<opz_registers>(opz_registers &regs, int32_t lfo_raw_pm, uint32_t count,
-	uint32_t const *block_freq, uint32_t const *detune, uint32_t const *multiple, uint32_t *step)
+inline bool dynamic_phase_steps<opz_registers>(opz_registers &regs, int32_t lfo_raw_pm, uint32_t count, uint32_t *step)
 {
-	return regs.all_phase_steps(lfo_raw_pm, count, block_freq, detune, multiple, step);
+	return regs.all_phase_steps(lfo_raw_pm, count, step);
 }
 
 // OPZ channel offsets are the channel numbers, so the sensitivity fields for

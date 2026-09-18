@@ -7,11 +7,12 @@
 // a four-operator patch that is 32 of them per sample, so it is worth doing a
 // slot at a time.
 //
-// The block carries raw pointers into the register file rather than decoded
-// values, because the layout it is built for puts a slot's eight channels in
-// eight consecutive bytes of every register block; decoding is eight lanes of
-// shift-and-mask and there is nothing to cache. The caller is what knows the
-// register offsets.
+// Everything that depends only on the registers is decoded by the caller when
+// they change, and reaches this as parallel arrays; what is left per sample is
+// the LFO's contribution, the octave overflow it can cause, and the table
+// lookup. The per-channel entries are eight long because a slot's eight
+// operators are its eight channels in order, so the same eight serve every
+// slot.
 
 #ifndef YMFM_DYNSTEP_H
 #define YMFM_DYNSTEP_H
@@ -28,20 +29,24 @@ namespace ymfm
 struct dyn_step_block
 {
 	uint32_t *step;              // [count] out: this sample's phase step
-	uint32_t const *block_freq;  // [count] cached block, keycode and fraction
-	uint32_t const *detune;      // [count] cached detune adjustment
-	uint32_t const *multiple;    // [count] cached frequency multiplier, x.4
 
-	uint8_t const *detune2_reg;  // [count] coarse detune in bits 6-7
-	uint8_t const *fix_reg;      // [count] fixed-frequency mode in bit 5
-	uint8_t const *range_reg;    // [count] fix range in bits 4-6, frequency in 0-3
-	uint8_t const *fine_reg;     // [count] fix fine in bits 0-3
-	uint8_t const *pm_sens_reg;  // [8] LFO 1 pitch sensitivity in bits 4-6
-	uint8_t const *pm2_sens_reg; // [8] LFO 2 pitch sensitivity in bits 4-6
-
+	uint32_t const *eff_base;    // [count] keycode with the octave gaps removed
+	uint32_t const *octave;      // [count]
+	uint32_t const *delta;       // [count] coarse detune, in 1/64ths
+	uint32_t const *detune;      // [count] detune by keycode
+	uint32_t const *multiple;    // [count] frequency multiplier, x.4
+	uint32_t const *fix_mask;    // [count] all ones in fixed-frequency mode
+	uint32_t const *fix_rate;    // [count] 75 * the fixed frequency
 	uint32_t *substep;           // [count] read and written, 12-bit fix remainder
+
+	uint32_t const *pm_shift;    // [8] signed, negative shifts right
+	uint32_t const *pm_live;     // [8] zero where sensitivity is zero
+	uint32_t const *pm2_shift;   // [8]
+	uint32_t const *pm2_live;    // [8]
+
 	int32_t lfo_raw_pm;          // both LFOs' PM, packed low byte and high byte
 	uint32_t count;              // operators, a multiple of 8
+	bool any_fixed;              // whether any operator is in fixed-frequency mode
 };
 
 // Recompute every operator's phase step for this sample. Only defined for

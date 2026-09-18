@@ -29,22 +29,6 @@ inline pair32 load_u(uint32_t const *p)
 	return {vld1q_u32(p), vld1q_u32(p + 4)};
 }
 
-// eight register bytes widened to eight lanes
-inline pair32 load_bytes(uint8_t const *p)
-{
-	uint16x8_t const wide = vmovl_u8(vld1_u8(p));
-	return {vmovl_u16(vget_low_u16(wide)), vmovl_u16(vget_high_u16(wide))};
-}
-
-// one bitfield out of eight register bytes; the shift is a variable one, which
-// is a single instruction either way
-inline pair32 field(pair32 v, int shift, uint32_t mask)
-{
-	int32x4_t const s = vdupq_n_s32(-shift);
-	uint32x4_t const m = vdupq_n_u32(mask);
-	return {vandq_u32(vshlq_u32(v.lo, s), m), vandq_u32(vshlq_u32(v.hi, s), m)};
-}
-
 inline pair32 splat(uint32_t v)
 {
 	return {vdupq_n_u32(v), vdupq_n_u32(v)};
@@ -136,75 +120,46 @@ inline uint32x4_t gather(uint32_t const *table, uint32x4_t index)
 	return out;
 }
 
-// The shift amount that applies the LFO's pitch sensitivity. The manual's
-// magnitudes correspond to shifting the 200-cent value by 5 down to 1 up, so
-// below 6 it is a right shift and at 6 and above a left one; as a signed
-// variable shift that is one instruction either way.
-inline pair32 pm_shift_of(pair32 sens)
-{
-	pair32 const six = splat(6);
-	pair32 const high = ge_u(sens, six);
-	pair32 const amount = sub(sens, six);
-	return select(high, add(amount, splat(1)), amount);
-}
-
 }
 
 void dyn_step_clock(dyn_step_block const &block)
 {
-	// both LFOs' PM values are the same for every operator
+	// Both LFOs' PM values are the same for every operator, and the
+	// sensitivity that scales them is per channel, so the whole contribution
+	// is one eight-lane value that serves every slot. The manual's magnitudes
+	// correspond to shifting the 200-cent value by five down to one up, which
+	// the caller has already turned into a signed shift; one instruction
+	// covers both directions.
 	pairs32 const pm_value = {
 		vdupq_n_s32(int8_t(block.lfo_raw_pm)), vdupq_n_s32(int8_t(block.lfo_raw_pm))};
 	pairs32 const pm2_value = {
 		vdupq_n_s32(int8_t(block.lfo_raw_pm >> 8)), vdupq_n_s32(int8_t(block.lfo_raw_pm >> 8))};
+	pair32 const pm_total = add(
+		bit_and(as_u(shift_s(pm_value, load_u(block.pm_shift))), load_u(block.pm_live)),
+		bit_and(as_u(shift_s(pm2_value, load_u(block.pm2_shift))), load_u(block.pm2_live)));
 
-	// the sensitivities are per channel, and a slot's eight operators are its
-	// eight channels in order, so the same eight bytes serve every slot
-	pair32 const sens = field(load_bytes(block.pm_sens_reg), 4, 7);
-	pair32 const sens2 = field(load_bytes(block.pm2_sens_reg), 4, 7);
-	pair32 const pm_shift = pm_shift_of(sens);
-	pair32 const pm2_shift = pm_shift_of(sens2);
 	pair32 const zero = splat(0);
-	pair32 const pm_quiet = eq(sens, zero);
-	pair32 const pm2_quiet = eq(sens2, zero);
-	pair32 const pm_live = {vmvnq_u32(pm_quiet.lo), vmvnq_u32(pm_quiet.hi)};
-	pair32 const pm2_live = {vmvnq_u32(pm2_quiet.lo), vmvnq_u32(pm2_quiet.hi)};
-
-	pair32 const pm_delta = bit_and(as_u(shift_s(pm_value, pm_shift)), pm_live);
-	pair32 const pm2_delta = bit_and(as_u(shift_s(pm2_value, pm2_shift)), pm2_live);
+	pair32 const octave_range = splat(768);
 
 	for (uint32_t base = 0; base < block.count; base += 8)
 	{
-		// coarse detune, as the manual's cents converted into 1/64ths
-		pair32 const detune2 = field(load_bytes(&block.detune2_reg[base]), 6, 3);
-		pair32 delta = zero;
-		delta = select(eq(detune2, splat(1)), splat((600 * 64 + 50) / 100), delta);
-		delta = select(eq(detune2, splat(2)), splat((781 * 64 + 50) / 100), delta);
-		delta = select(eq(detune2, splat(3)), splat((950 * 64 + 50) / 100), delta);
-		delta = add(add(delta, pm_delta), pm2_delta);
+		pairs32 const eff = as_s(add(load_u(&block.eff_base[base]),
+			add(load_u(&block.delta[base]), pm_total)));
+		pair32 const octave = load_u(&block.octave[base]);
 
-		// The keycode in bits 6-9 is gappy, mapping 12 values over 16 in each
-		// octave; multiplying the 4-bit value by 3/4 removes the gaps so the
-		// delta can be added, and the 6-bit fraction goes back underneath.
-		pair32 const bf = load_u(&block.block_freq[base]);
-		pair32 const octave = field(bf, 10, 7);
-		pair32 const code = sub(field(bf, 6, 0xf), field(bf, 8, 3));
-		pairs32 const eff = as_s(add(bit_or(shift_u(code, splat(6)), field(bf, 0, 0x3f)), delta));
-
-		// over and underflow move the octave instead; the minimum delta is
-		// -512 so it can only underflow by one, and the maximum is +512+608 so
-		// it can overflow by two
+		// Over and underflow move the octave instead. The minimum delta is
+		// -512, so it can only underflow by one; the maximum is +512+608, so
+		// it can overflow by two.
 		pair32 const under = lt_s(eff, 0);
 		pair32 const over = ge_s(eff, 768);
-		pair32 const seven_sixty_eight = splat(768);
 
-		pair32 const eff_under = add(as_u(eff), seven_sixty_eight);
+		pair32 const eff_under = add(as_u(eff), octave_range);
 		pair32 const oct_under = sub(octave, splat(1));
 		pair32 const clamp_under = bit_and(under, eq(octave, zero));
 
-		pair32 const eff_over1 = sub(as_u(eff), seven_sixty_eight);
-		pair32 const again = ge_u(eff_over1, seven_sixty_eight);
-		pair32 const eff_over = select(again, sub(eff_over1, seven_sixty_eight), eff_over1);
+		pair32 const eff_over1 = sub(as_u(eff), octave_range);
+		pair32 const again = ge_u(eff_over1, octave_range);
+		pair32 const eff_over = select(again, sub(eff_over1, octave_range), eff_over1);
 		pair32 const oct_over1 = select(again, add(octave, splat(1)), octave);
 		pair32 const clamp_over = bit_and(over, ge_u(oct_over1, splat(7)));
 		pair32 const oct_over = add(oct_over1, splat(1));
@@ -214,8 +169,7 @@ void dyn_step_clock(dyn_step_block const &block)
 
 		// the clamped lanes are replaced below, but their index still has to
 		// be inside the table for the gather
-		index = bit_and(index, splat(0x3ff));
-		index = select(ge_u(index, splat(768)), splat(767), index);
+		index = select(ge_u(index, octave_range), splat(767), index);
 
 		pair32 const looked_up = {
 			gather(g_phase_step_table, index.lo), gather(g_phase_step_table, index.hi)};
@@ -228,28 +182,24 @@ void dyn_step_clock(dyn_step_block const &block)
 
 		// detune by keycode, then the frequency multiplier, which is an x.4
 		pair32 const tuned = add(shifted, load_u(&block.detune[base]));
-		pair32 const pitched = shift_u(mul(tuned, load_u(&block.multiple[base])), splat(uint32_t(-4)));
+		pair32 out = shift_u(mul(tuned, load_u(&block.multiple[base])), splat(uint32_t(-4)));
 
-		// Fixed-frequency mode replaces all of that. The fix registers occupy
-		// the same space as detune and multiple, so those do not apply; the
-		// plain step has too little resolution for the range, so a per
-		// operator sub-step carries twelve more bits.
-		pair32 const range = load_bytes(&block.range_reg[base]);
-		pair32 fixed_freq = shift_u(field(range, 0, 0xf), splat(4));
-		fixed_freq = select(eq(fixed_freq, zero), splat(8), fixed_freq);
-		fixed_freq = bit_or(fixed_freq, field(load_bytes(&block.fine_reg[base]), 0, 0xf));
-		fixed_freq = shift_u(fixed_freq, field(range, 4, 7));
+		// Fixed-frequency mode replaces all of that; its registers occupy the
+		// same space as detune and multiple, so those do not apply. The plain
+		// step has too little resolution for the range, so a per-operator
+		// sub-step carries twelve more bits. Skipped entirely when no operator
+		// is in that mode, which is the usual case.
+		if (block.any_fixed)
+		{
+			pair32 const previous = load_u(&block.substep[base]);
+			pair32 const substep = add(previous, load_u(&block.fix_rate[base]));
+			pair32 const fixed = load_u(&block.fix_mask[base]);
+			pair32 const kept = select(fixed, bit_and(substep, splat(0xfff)), previous);
+			vst1q_u32(&block.substep[base], kept.lo);
+			vst1q_u32(&block.substep[base + 4], kept.hi);
+			out = select(fixed, shift_u(substep, splat(uint32_t(-12))), out);
+		}
 
-		pair32 const substep = add(load_u(&block.substep[base]), mul(splat(75), fixed_freq));
-		pair32 const fix_step = shift_u(substep, splat(uint32_t(-12)));
-		pair32 const fix_off = eq(field(load_bytes(&block.fix_reg[base]), 5, 1), zero);
-		pair32 const fix_mask = {vmvnq_u32(fix_off.lo), vmvnq_u32(fix_off.hi)};
-
-		pair32 const kept = select(fix_mask, bit_and(substep, splat(0xfff)), load_u(&block.substep[base]));
-		vst1q_u32(&block.substep[base], kept.lo);
-		vst1q_u32(&block.substep[base + 4], kept.hi);
-
-		pair32 const out = select(fix_mask, fix_step, pitched);
 		vst1q_u32(&block.step[base], out.lo);
 		vst1q_u32(&block.step[base + 4], out.hi);
 	}

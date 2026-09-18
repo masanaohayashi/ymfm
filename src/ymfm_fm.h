@@ -397,7 +397,7 @@ void lfo_am_offsets(RegisterType const &regs, uint32_t const *choffs, uint32_t c
 // back to asking each operator in turn. Specialized where the register layout
 // puts a slot's eight channels side by side.
 template<class RegisterType>
-bool dynamic_phase_steps(RegisterType &, int32_t, uint32_t, uint32_t const *, uint32_t const *, uint32_t const *, uint32_t *)
+bool dynamic_phase_steps(RegisterType &, int32_t, uint32_t, uint32_t *)
 {
 	return false;
 }
@@ -551,11 +551,6 @@ protected:
 	static constexpr uint32_t CH_COUNT = (CHANNELS + 7) & ~7u;
 	alignas(16) uint32_t m_op_phase[EG_COUNT];        // 10.10 phase
 	alignas(16) uint32_t m_op_phase_step[EG_COUNT];   // step to add each sample
-	// The three cached values the per-sample step needs; everything else it
-	// reads comes straight out of the register file.
-	alignas(16) uint32_t m_op_block_freq[EG_COUNT];
-	alignas(16) uint32_t m_op_detune[EG_COUNT];
-	alignas(16) uint32_t m_op_multiple[EG_COUNT];
 	alignas(16) uint32_t m_eg_atten[EG_COUNT];
 	alignas(16) uint32_t m_eg_state[EG_COUNT];
 	alignas(16) uint32_t m_eg_sustain[EG_COUNT];

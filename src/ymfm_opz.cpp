@@ -158,6 +158,7 @@ void opz_registers::reset()
 {
 	std::fill_n(&m_regdata[0], REGISTERS, 0);
 	std::fill_n(&m_phase_substep[0], OPERATORS, 0);
+	m_fix_bits = 0;
 
 	// enable output on both channels by default
 	m_regdata[0x30] = m_regdata[0x31] = m_regdata[0x32] = m_regdata[0x33] = 0x01;
@@ -367,30 +368,31 @@ int32_t opz_registers::clock_noise_and_lfo()
 //  for the given channel
 //-------------------------------------------------
 
-bool opz_registers::all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t const *block_freq,
-	uint32_t const *detune, uint32_t const *multiple, uint32_t *step)
+bool opz_registers::all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t *step)
 {
 #if YMFM_HAVE_VECTOR_DYNSTEP
 	assert(count <= OPERATORS);
 	dyn_step_block block;
 	block.step = step;
-	block.block_freq = block_freq;
-	block.detune = detune;
-	block.multiple = multiple;
-	block.detune2_reg = &m_regdata[0xc0];
-	block.fix_reg = &m_regdata[0x80];
-	// fix range and frequency share the register with detune and multiple
-	block.range_reg = &m_regdata[0x40];
-	block.fine_reg = &m_regdata[0x100];
-	block.pm_sens_reg = &m_regdata[0x38];
-	block.pm2_sens_reg = &m_regdata[0x180];
+	block.eff_base = m_step_eff_base;
+	block.octave = m_step_octave;
+	block.delta = m_step_delta;
+	block.detune = m_step_detune;
+	block.multiple = m_step_multiple;
+	block.fix_mask = m_step_fix_mask;
+	block.fix_rate = m_step_fix_rate;
 	block.substep = m_phase_substep;
+	block.pm_shift = m_step_pm_shift;
+	block.pm_live = m_step_pm_live;
+	block.pm2_shift = m_step_pm2_shift;
+	block.pm2_live = m_step_pm2_live;
 	block.lfo_raw_pm = lfo_raw_pm;
 	block.count = count;
+	block.any_fixed = (m_fix_bits != 0);
 	dyn_step_clock(block);
 	return true;
 #else
-	(void)lfo_raw_pm; (void)count; (void)block_freq; (void)detune; (void)multiple; (void)step;
+	(void)lfo_raw_pm; (void)count; (void)step;
 	return false;
 #endif
 }
@@ -442,6 +444,10 @@ uint32_t opz_registers::lfo_am_offset(uint32_t choffs) const
 //  with prefetched data
 //-------------------------------------------------
 
+// coarse detune, the manual's cents value converted into 1/64ths
+static const int16_t s_detune2_delta[4] = { 0, (600*64+50)/100, (781*64+50)/100, (950*64+50)/100 };
+
+
 void opz_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata_cache &cache)
 {
 	// TODO: how does fixed frequency mode work? appears to be enabled by
@@ -473,6 +479,37 @@ void opz_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 	if (cache.multiple == 0)
 		cache.multiple = 0x08;
 	cache.multiple |= op_fine(opoffs);
+
+	// Everything the per-sample step needs, decoded here rather than pulled
+	// back out of the registers for every operator on every sample. The
+	// keycode in bits 6-9 is gappy, mapping 12 values over 16 in each octave;
+	// multiplying the 4-bit value by 3/4 removes the gaps so a delta can be
+	// added, and the 6-bit fraction goes back underneath.
+	m_step_eff_base[opoffs] = ((bitfield(block_freq, 6, 4) - bitfield(block_freq, 8, 2)) << 6)
+		| bitfield(block_freq, 0, 6);
+	m_step_octave[opoffs] = bitfield(block_freq, 10, 3);
+	m_step_delta[opoffs] = uint32_t(int32_t(s_detune2_delta[op_detune2(opoffs)]));
+	m_step_detune[opoffs] = uint32_t(cache.detune);
+	m_step_multiple[opoffs] = cache.multiple;
+
+	uint32_t const fixed = op_fix_mode(opoffs);
+	m_step_fix_mask[opoffs] = fixed ? 0xffffffffu : 0u;
+	m_fix_bits = (m_fix_bits & ~(1u << opoffs)) | (fixed << opoffs);
+	uint32_t fixed_freq = op_fix_frequency(opoffs) << 4;
+	if (fixed_freq == 0)
+		fixed_freq = 8;
+	fixed_freq |= op_fine(opoffs);
+	fixed_freq <<= op_fix_range(opoffs);
+	m_step_fix_rate[opoffs] = 75 * fixed_freq;
+
+	// the sensitivities are per channel, so this lands on the same entry once
+	// for each of the channel's operators
+	uint32_t const sens = ch_lfo_pm_sens(choffs);
+	m_step_pm_shift[choffs] = uint32_t(int32_t(sens) - ((sens >= 6) ? 5 : 6));
+	m_step_pm_live[choffs] = (sens != 0) ? 0xffffffffu : 0u;
+	uint32_t const sens2 = ch_lfo2_pm_sens(choffs);
+	m_step_pm2_shift[choffs] = uint32_t(int32_t(sens2) - ((sens2 >= 6) ? 5 : 6));
+	m_step_pm2_live[choffs] = (sens2 != 0) ? 0xffffffffu : 0u;
 
 	// phase step, or PHASE_STEP_DYNAMIC if PM is active; this depends on
 	// block_freq, detune, and multiple, so compute it after we've done those;
@@ -545,7 +582,6 @@ uint32_t opz_registers::compute_phase_step(uint32_t choffs, uint32_t opoffs, opd
 	{
 		// start with coarse detune delta; table uses cents value from
 		// manual, converted into 1/64ths
-		static const int16_t s_detune2_delta[4] = { 0, (600*64+50)/100, (781*64+50)/100, (950*64+50)/100 };
 		int32_t delta = s_detune2_delta[op_detune2(opoffs)];
 
 		// add in the PM deltas

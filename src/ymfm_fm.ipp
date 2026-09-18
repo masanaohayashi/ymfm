@@ -1170,9 +1170,6 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	// padding past the real operator count has to be defined
 	std::memset(m_op_phase, 0, sizeof(m_op_phase));
 	std::memset(m_op_phase_step, 0, sizeof(m_op_phase_step));
-	std::memset(m_op_block_freq, 0, sizeof(m_op_block_freq));
-	std::memset(m_op_detune, 0, sizeof(m_op_detune));
-	std::memset(m_op_multiple, 0, sizeof(m_op_multiple));
 	std::memset(m_op_eg_shift, 0, sizeof(m_op_eg_shift));
 	std::memset(m_op_total_level, 0, sizeof(m_op_total_level));
 	std::memset(m_op_am_mask, 0, sizeof(m_op_am_mask));
@@ -1268,9 +1265,6 @@ void fm_engine_base<RegisterType>::publish_op_cache(uint32_t opnum, uint32_t opo
 	m_eg_cur_inc[opnum] = m_eg_inc[current][opnum];
 
 	m_op_phase_step[opnum] = cache.phase_step;
-	m_op_block_freq[opnum] = cache.block_freq;
-	m_op_detune[opnum] = uint32_t(cache.detune);
-	m_op_multiple[opnum] = cache.multiple;
 	m_op_eg_shift[opnum] = cache.eg_shift;
 	m_op_total_level[opnum] = cache.total_level;
 	m_op_am_mask[opnum] = m_regs.op_lfo_am_enable(opoffs) ? 0xffffffffu : 0u;
@@ -1439,8 +1433,7 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 		// gathering the dynamic ones out of it; when nothing is dynamic there
 		// is nothing to do at all.
 		if (m_dynamic_count != 0
-			&& !dynamic_phase_steps<RegisterType>(m_regs, lfo_raw_pm, EG_COUNT,
-				m_op_block_freq, m_op_detune, m_op_multiple, m_op_phase_step))
+			&& !dynamic_phase_steps<RegisterType>(m_regs, lfo_raw_pm, EG_COUNT, m_op_phase_step))
 		{
 			for (uint32_t index = 0; index < m_dynamic_count; index++)
 			{
