@@ -6,8 +6,18 @@
 #include <cstring>
 #include <vector>
 
+static int selected_count = 0;
+static char** selected_cases = nullptr;
+
 template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256, bool pitch_only=false, bool staggered=false)
 {
+    char case_name[80];
+    std::snprintf(case_name,sizeof(case_name),"%s_%s",sizeof(Real)==4?"f32":"f64",name);
+    if(selected_count){
+        bool selected=false;
+        for(int i=0;i<selected_count;++i)selected|=std::strcmp(case_name,selected_cases[i])==0;
+        if(!selected)return;
+    }
     using namespace ymfm::precision;
     fm_engine<Real,128> synth(model::opz);
     voice_parameters<Real> patch;
@@ -54,12 +64,16 @@ template<class Real> void measure(const char* name, unsigned voices, bool lfo, u
 int main(int argc,char** argv){
     unsigned repeats=argc>1?unsigned(std::atoi(argv[1])):3;
     if(!repeats)return 1;
+    if(argc>2 && std::strcmp(argv[2],"--cases")==0){
+        if(argc<4)return 1;
+        selected_count=argc-3;selected_cases=argv+3;
+    }
     if(argc>2 && std::strcmp(argv[2],"mixed")==0){
         measure<float>("mixed_envelopes",128,true,repeats,false,false,256,false,true);
         measure<double>("mixed_envelopes",128,true,repeats,false,false,256,false,true);
         return 0;
     }
-    if(argc>2){measure<double>("full_lfo",128,true,repeats);return 0;}
+    if(argc>2 && !selected_count){measure<double>("full_lfo",128,true,repeats);return 0;}
     measure<float>("idle",0,false,repeats);measure<double>("idle",0,false,repeats);
     measure<float>("released",128,true,repeats,true);measure<double>("released",128,true,repeats,true);
     measure<float>("one",1,true,repeats);measure<double>("one",1,true,repeats);
