@@ -97,9 +97,9 @@ template<class Real> inline uint64_t phase_step(Real hz, Real sample_rate)
 
 // Native 128-bit packets on AArch64/Clang; keep a scalar build for cross-checking.
 // This does not change the precision of any lane.
-template<class Real> struct wave_packet;
+template<class Real> struct simd_packet;
 #if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
-template<> struct wave_packet<float> {
+template<> struct simd_packet<float> {
     using type = float __attribute__((vector_size(16)));
     static type load(const float* p) { type v; std::memcpy(&v,p,sizeof(v)); return v; }
     static void gather(const float* const* c, type& c0, type& c1, type& c2, type& c3) {
@@ -114,7 +114,7 @@ template<> struct wave_packet<float> {
         c3=__builtin_shufflevector(ab1,de1,2,3,6,7);
     }
 };
-template<> struct wave_packet<double> {
+template<> struct simd_packet<double> {
     using type = double __attribute__((vector_size(16)));
     static type load(const double* p) { type v; std::memcpy(&v,p,sizeof(v)); return v; }
     static void gather(const double* const* c, type& c0, type& c1, type& c2, type& c3) {
@@ -151,7 +151,7 @@ public:
                        const Real* gains, Real* output) const
     {
 #if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
-        using vector = typename wave_packet<Real>::type;
+        using vector = typename simd_packet<Real>::type;
         vector t{}, c0, c1, c2, c3, gain;
         const Real* coefficients[packet_size];
         for (unsigned n = 0; n < packet_size; ++n) {
@@ -160,7 +160,7 @@ public:
             t[n] = Real(phases[n] & mask) * Real(1.0 / 4503599627370496.0);
             coefficients[n] = m_c[waves[n]][index];
         }
-        wave_packet<Real>::gather(coefficients, c0, c1, c2, c3);
+        simd_packet<Real>::gather(coefficients, c0, c1, c2, c3);
         std::memcpy(&gain, gains, sizeof(gain));
         vector result = (((c3 * t + c2) * t + c1) * t + c0) * gain;
         std::memcpy(output, &result, sizeof(result));
@@ -229,6 +229,31 @@ public:
                 (Real(0.2402265069591007123) + r * (Real(0.05550410866482157995) + r *
                 (Real(0.00961812910762847716) + r * Real(0.00133335581464284434)))));
         return m_value[unsigned(index + 4096)] * p;
+    }
+    void lookup_packet(const Real* x, Real* output) const
+    {
+        constexpr unsigned width = wave_table<Real>::packet_size;
+#if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
+        using vector = typename simd_packet<Real>::type;
+        vector r{}, scale{};
+        for (unsigned n = 0; n < width; ++n) {
+            int index = int(x[n] * Real(64));
+            r[n] = x[n] - Real(index) * Real(0.015625);
+            scale[n] = m_value[unsigned(index + 4096)];
+        }
+        vector polynomial;
+        if (std::is_same<Real, float>::value)
+            polynomial = Real(1) + r * (Real(0.6931471805599453094) + r *
+                (Real(0.2402265069591007123) + r * Real(0.05550410866482157995)));
+        else
+            polynomial = Real(1) + r * (Real(0.6931471805599453094) + r *
+                (Real(0.2402265069591007123) + r * (Real(0.05550410866482157995) + r *
+                (Real(0.00961812910762847716) + r * Real(0.00133335581464284434)))));
+        vector result = scale * polynomial;
+        std::memcpy(output, &result, sizeof(result));
+#else
+        for (unsigned n = 0; n < width; ++n) output[n] = lookup(x[n]);
+#endif
     }
 private:
     exponential_table()
@@ -745,51 +770,80 @@ private:
     void prepare_steady_kernels()
     {
         m_steady_ready.fill(false);
-        // A constant envelope and absent LFOs make the gain invariant for this
-        // block. Parameter edits are applied only between render calls.
-        if (m_live_count < wave_table<Real>::packet_size || m_lfo_count[0] || m_lfo_count[1]) return;
+        // Held EGs have a constant base attenuation. LFO modulation remains
+        // sample-accurate; controls are applied between render calls.
+        if (m_live_count < wave_table<Real>::packet_size) return;
         m_steady_first = m_live[0];
         if (m_live[m_live_count - 1] != m_steady_first + m_live_count - 1) return;
         for (unsigned o = 0; o < 4; ++o) {
             if (o == 3 && m_noise_count) continue;
             auto& b = m_op[o];
-            bool held = true;
-            for (std::size_t n = 0; n < m_live_count; ++n)
-                if (b.state[m_steady_first + n] != stage::sustain_hold) { held = false; break; }
-            if (!held) continue;
-            m_steady_ready[o] = true;
+            bool held = true, pitch = false, amplitude = false;
             for (std::size_t n = 0; n < m_live_count; ++n) {
                 std::size_t v = m_steady_first + n;
-                m_steady_gain[o][v] = m_exp.lookup(-(b.attenuation[v] * b.shift[v] + b.level[v]) * Real(0.015625));
+                if (b.state[v] != stage::sustain_hold) { held = false; break; }
+                bool amplitude_lfo = m_lfo[0].amplitude[v] != Real(0) || m_lfo[1].amplitude[v] != Real(0);
+                amplitude |= b.am[v] && amplitude_lfo;
+                pitch |= b.pitch_modulated[v] &&
+                    (m_lfo[0].pitch[v] != Real(0) || m_lfo[1].pitch[v] != Real(0));
+            }
+            if (!held) continue;
+            m_steady_ready[o] = true; m_steady_pitch[o] = pitch; m_steady_am[o] = amplitude;
+            for (std::size_t n = 0; n < m_live_count; ++n) {
+                std::size_t v = m_steady_first + n;
+                m_steady_attenuation[o][v] = b.attenuation[v] * b.shift[v] + b.level[v];
+                if (!amplitude) m_steady_gain[o][v] = m_exp.lookup(-m_steady_attenuation[o][v] * Real(0.015625));
             }
         }
     }
-    template<unsigned o> uint64_t steady_phase(std::size_t v)
+    template<unsigned o, bool Pitch> uint64_t steady_phase(std::size_t v)
     {
         auto& b = m_op[o];
-        b.phase[v] += b.step[v];
+        uint64_t step = b.step[v];
+        if (Pitch && b.pitch_modulated[v] && m_pm[v] != Real(0))
+            step = positive_phase_offset(static_cast<double>(b.frequency[v] * m_pitch_factor[v]) * m_inverse_rate);
+        b.phase[v] += step;
         Real offset = Real(0);
         if (o == 0) offset = (m_feedback0[v] + m_feedback1[v]) * m_feedback_scale[v];
         else for (unsigned j = 0; j < o; ++j)
             if (m_routes[o - 1][v] & (1u << j)) offset += m_op[j].output[v] * Real(4);
         return b.phase[v] + bounded_phase_offset(offset);
     }
-    template<unsigned o> void steady_kernel()
+    template<unsigned o, bool Pitch, bool Amplitude> void steady_kernel()
     {
         constexpr unsigned width = wave_table<Real>::packet_size;
         auto& b = m_op[o];
         std::size_t v = m_steady_first, end = v + m_live_count;
         for (; v + width <= end; v += width) {
             uint64_t phases[width];
-            for (unsigned n = 0; n < width; ++n) phases[n] = steady_phase<o>(v + n);
-            m_wave.lookup_packet(&b.waveform[v], phases, &m_steady_gain[o][v], &b.output[v]);
+            for (unsigned n = 0; n < width; ++n) phases[n] = steady_phase<o, Pitch>(v + n);
+            if (Amplitude) {
+                Real attenuation[width], gains[width];
+                for (unsigned n = 0; n < width; ++n)
+                    attenuation[n] = -(m_steady_attenuation[o][v+n] + (b.am[v+n] ? m_am[v+n] : Real(0))) * Real(0.015625);
+                m_exp.lookup_packet(attenuation, gains);
+                m_wave.lookup_packet(&b.waveform[v], phases, gains, &b.output[v]);
+            } else
+                m_wave.lookup_packet(&b.waveform[v], phases, &m_steady_gain[o][v], &b.output[v]);
         }
-        for (; v < end; ++v)
-            b.output[v] = m_wave.lookup(b.waveform[v], steady_phase<o>(v)) * m_steady_gain[o][v];
+        for (; v < end; ++v) {
+            Real gain = Amplitude ? m_exp.lookup(-(m_steady_attenuation[o][v] + (b.am[v] ? m_am[v] : Real(0))) * Real(0.015625))
+                                  : m_steady_gain[o][v];
+            b.output[v] = m_wave.lookup(b.waveform[v], steady_phase<o, Pitch>(v)) * gain;
+        }
     }
     template<unsigned o, bool Single, bool Steady> void operator_kernel()
     {
-        if (Steady && !Single && m_steady_ready[o]) { steady_kernel<o>(); return; }
+        if (Steady && !Single && m_steady_ready[o]) {
+            if (m_steady_pitch[o]) {
+                if (m_steady_am[o]) steady_kernel<o, true, true>();
+                else steady_kernel<o, true, false>();
+            } else {
+                if (m_steady_am[o]) steady_kernel<o, false, true>();
+                else steady_kernel<o, false, false>();
+            }
+            return;
+        }
         auto& b = m_op[o];
         for (std::size_t n = 0; n < (Single ? 1 : m_live_count); ++n) {
             std::size_t v = m_live[n];
@@ -850,8 +904,8 @@ private:
             b.output[v] = m_wave.lookup(b.waveform[v], lookup) * m_exp.lookup(-attenuation * Real(0.015625));
         }
     }
-    std::array<bool, 4> m_steady_ready{};
-    std::array<lanes<Real>, 4> m_steady_gain{};
+    std::array<bool, 4> m_steady_ready{}, m_steady_pitch{}, m_steady_am{};
+    std::array<lanes<Real>, 4> m_steady_gain{}, m_steady_attenuation{};
     std::size_t m_steady_first = 0;
     model m_model;
     const wave_table<Real>& m_wave;

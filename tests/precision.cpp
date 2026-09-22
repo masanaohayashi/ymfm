@@ -71,6 +71,21 @@ template<class R> void wave_packets()
     }
 }
 
+template<class R> void exponential_packets()
+{
+    const auto& table=exponential_table<R>::instance();
+    constexpr unsigned width=wave_table<R>::packet_size;
+    R x[width],out[width];uint64_t rng=9;
+    for(unsigned trial=0;trial<100000;++trial){
+        for(unsigned n=0;n<width;++n){
+            rng=rng*UINT64_C(6364136223846793005)+1;
+            x[n]=trial==0 ? (n%2 ? R(-64) : R(16)) : R(rng>>32)*R(80.0/4294967296.0)-R(64);
+        }
+        table.lookup_packet(x,out);
+        for(unsigned n=0;n<width;++n)CHECK(out[n]==table.lookup(x[n]));
+    }
+}
+
 template<class R> void phase_boundaries()
 {
     CHECK(phase_offset(R(0)) == 0);
@@ -479,11 +494,14 @@ template<class R> void held_envelope_edits()
 
 template<class R> void steady_packets()
 {
-    // The reference has a zero-frequency triangle pitch LFO at phase zero.
-    // It changes no samples, but keeps the general operator kernel selected.
+    // An inaudible extra slot breaks the reference's contiguous voice run,
+    // so it always uses the general kernel without changing the audible mix.
     for (unsigned voices : {3u,4u,5u,8u,17u,123u}) {
         fm_engine<R,128> packet(model::opz),reference(model::opz);
         std::array<voice_parameters<R>,128> patches;
+        voice_parameters<R> silent;
+        silent.gain_left=silent.gain_right=R(0);silent.operators[3].attack=R(0);
+        CHECK(reference.set_voice(0,silent));CHECK(reference.key_on(0,8));
         for(unsigned n=0;n<voices;++n){
             unsigned v=n+5;auto& p=patches[v];
             p.algorithm=n%8;p.feedback=R(n%100);p.frequency=R(73.5+3*n);
@@ -496,8 +514,7 @@ template<class R> void steady_packets()
                 op.release=R(127);op.am_enabled=true;
             }
             CHECK(packet.set_voice(v,p));
-            auto q=p;q.lfos[1].pitch_cents=R(1);
-            CHECK(reference.set_voice(v,q));
+            CHECK(reference.set_voice(v,p));
             CHECK(packet.key_on(v));CHECK(reference.key_on(v));
         }
         std::vector<R> a(4096),b(4096),c(4096),d(4096);
@@ -516,8 +533,7 @@ template<class R> void steady_packets()
         compare(257);compare(4096);
         auto edit=[&](unsigned v){
             CHECK(packet.set_voice(v,patches[v]));
-            auto p=patches[v];p.lfos[1].pitch_cents=R(1);
-            CHECK(reference.set_voice(v,p));
+            CHECK(reference.set_voice(v,patches[v]));
         };
         patches[5].operators[3].total_level=R(43.75);edit(5);compare(256);
         patches[6].noise=true;edit(6);compare(256);
@@ -526,6 +542,22 @@ template<class R> void steady_packets()
         patches[5].lfos[0].frequency=R(7);patches[5].lfos[0].amplitude=R(19);
         edit(5);compare(257);
         patches[5].lfos[0].amplitude=R(0);edit(5);compare(257);
+        // Pitch-only LFOs keep amplitude invariant. Mix fixed-frequency
+        // operators with and without pitch modulation in the same packet.
+        for(unsigned v=5;v<5+voices;++v){
+            auto& p=patches[v];p.lfos[0].frequency=R(v+1);p.lfos[0].pitch_cents=R(73);
+            p.lfos[0].waveform=static_cast<lfo_wave>(v%5);
+            p.operators[1].fixed=v%3==0;p.operators[1].fixed_pitch_modulation=v%2==0;
+            edit(v);
+        }
+        compare(257);compare(4096);
+        // Global AM does not affect operators with AM disabled.
+        for(unsigned v=5;v<5+voices;++v){
+            patches[v].lfos[0].amplitude=R(17);
+            for(unsigned o=0;o<4;++o)patches[v].operators[o].am_enabled=o%2==0;
+            edit(v);
+        }
+        compare(257);compare(4096);
         // Release just one operator: other operators initially remain eligible.
         // Retirement of its voice later splits the contiguous run mid-block.
         CHECK(packet.key_off(6,1));CHECK(reference.key_off(6,1));compare(256);
@@ -539,6 +571,7 @@ int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
     wave_packets<float>();wave_packets<double>();
+    exponential_packets<float>();exponential_packets<double>();
     phase_boundaries<float>();phase_boundaries<double>();
     algorithms<float>();algorithms<double>();
     envelopes<float>();envelopes<double>();

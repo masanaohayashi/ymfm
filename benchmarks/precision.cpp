@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <vector>
 
-template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256)
+template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256, bool pitch_only=false)
 {
     using namespace ymfm::precision;
     fm_engine<Real,128> synth(model::opz);
@@ -13,7 +13,7 @@ template<class Real> void measure(const char* name, unsigned voices, bool lfo, u
     patch.algorithm=4; patch.feedback=Real(45.5);
     patch.gain_left=patch.gain_right=Real(1)/128;
     if(lfo){patch.lfos[0].frequency=Real(5.2);patch.lfos[0].pitch_cents=Real(12.5);
-        patch.lfos[1].frequency=Real(0.7);patch.lfos[1].amplitude=Real(8.5);}
+        patch.lfos[1].frequency=Real(0.7);patch.lfos[1].amplitude=pitch_only?Real(0):Real(8.5);}
     for(unsigned op=0;op<4;++op){auto& p=patch.operators[op];p.waveform=op;p.ratio=Real(op+1);
         p.attack=Real(100.25);p.decay=Real(40.5);p.sustain_level=Real(64);
         p.total_level=Real(12*op);p.am_enabled=true;
@@ -54,6 +54,7 @@ int main(int argc,char** argv){
     measure<float>("full_lfo",128,true,repeats);measure<double>("full_lfo",128,true,repeats);
     measure<float>("steady_dry",128,false,repeats,false,true);measure<double>("steady_dry",128,false,repeats,false,true);
     measure<float>("steady_lfo",128,true,repeats,false,true);measure<double>("steady_lfo",128,true,repeats,false,true);
+    measure<float>("steady_pitch",128,true,repeats,false,true,256,true);measure<double>("steady_pitch",128,true,repeats,false,true,256,true);
     measure<float>("small_block",128,true,repeats,false,false,16);measure<double>("small_block",128,true,repeats,false,false,16);
     measure<float>("large_block",128,true,repeats,false,false,1024);measure<double>("large_block",128,true,repeats,false,false,1024);
 }

@@ -5,7 +5,7 @@ OPM (YM2151) / OPZ (YM2414) 用の高精度演算コアを追加しています�
 
 - `float` / `double` を選択できる音声演算と波形テーブル
 - 64 bit整数位相、波形の3次補間、連続EG・フィードバック・ミックス
-- SoA配置、最大128個のボイススロット、AArch64/Clangでの定常波形SIMD評価
+- SoA配置、最大128個のボイススロット、AArch64/Clangでの定常発音のSIMD評価
 - [使用方法と検証](docs/high-precision.md) / [全体設計](docs/extended-engine-design.md)
 
 以下は上流ymfmのREADMEです。
