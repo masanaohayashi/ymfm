@@ -567,6 +567,49 @@ template<class R> void steady_packets()
     }
 }
 
+template<class R> void dynamic_packets()
+{
+    for(model chip:{model::opm,model::opz})for(unsigned voices:{4u,5u,17u}) {
+        fm_engine<R,128> packet(chip),reference(chip);
+        voice_parameters<R> silent;silent.gain_left=silent.gain_right=R(0);
+        silent.operators[3].attack=R(0);reference.set_voice(0,silent);reference.key_on(0,8);
+        std::array<voice_parameters<R>,128> patches;
+        for(unsigned n=0;n<voices;++n){
+            unsigned v=5+n;auto& p=patches[v];p.algorithm=n%8;p.feedback=R(83.5);
+            p.frequency=R(117.25+n*7);p.gain_left=p.gain_right=R(0.02);
+            p.lfos[0].frequency=R(37);p.lfos[0].pitch_cents=R(31);p.lfos[0].amplitude=R(17);
+            for(unsigned o=0;o<4;++o){auto& op=p.operators[o];
+                op.waveform=chip==model::opz?(n+o)%8:0;
+                op.attack=R(80.25+7*o+n%3);op.decay=R(90.5+n%5);
+                op.sustain_level=R(3+n%3);op.sustain_rate=n%2?R(4.1):R(0);
+                op.release=R(127);op.reverb=R(100.5);op.total_level=R(12.5*o);op.am_enabled=true;
+            }
+            packet.set_voice(v,p);reference.set_voice(v,p);packet.key_on(v);reference.key_on(v);
+        }
+        std::vector<R>a(8192),b(8192),c(8192),d(8192);
+        auto compare=[&](unsigned frames){
+            allocations=0;watch_allocation=true;
+            CHECK(packet.render(a.data(),b.data(),frames));CHECK(reference.render(c.data(),d.data(),frames));
+            watch_allocation=false;CHECK(allocations==0);
+            CHECK(std::equal(a.begin(),a.begin()+frames,c.begin()));
+            CHECK(std::equal(b.begin(),b.begin()+frames,d.begin()));
+            bool equal=true;
+            for(unsigned v=5;v<5+voices;++v)for(unsigned o=0;o<4;++o)
+                equal&=packet.phase(v,o)==reference.phase(v,o)&&packet.attenuation(v,o)==reference.attenuation(v,o);
+            CHECK(equal);
+        };
+        compare(257);compare(8192);
+        for(unsigned v=5;v<5+voices;++v){packet.key_off(v);reference.key_off(v);}
+        compare(257);compare(8192);
+        for(unsigned v=5;v<5+voices;++v){
+            patches[v].noise=v==5;patches[v].operators[0].attack=R(0);
+            packet.set_voice(v,patches[v]);reference.set_voice(v,patches[v]);
+            packet.key_on(v);reference.key_on(v);
+        }
+        compare(257);compare(8192);
+    }
+}
+
 int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
@@ -584,6 +627,7 @@ int main()
     singleton_transition<float>();singleton_transition<double>();
     held_envelope_edits<float>();held_envelope_edits<double>();
     steady_packets<float>();steady_packets<double>();
+    dynamic_packets<float>();dynamic_packets<double>();
     sleeping_random();sleeping_voices<float>();sleeping_voices<double>();
     std::printf("%u failures\n",failures);
     return failures?1:0;

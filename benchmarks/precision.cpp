@@ -3,9 +3,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
-template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256, bool pitch_only=false)
+template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256, bool pitch_only=false, bool staggered=false)
 {
     using namespace ymfm::precision;
     fm_engine<Real,128> synth(model::opz);
@@ -19,9 +20,18 @@ template<class Real> void measure(const char* name, unsigned voices, bool lfo, u
         p.total_level=Real(12*op);p.am_enabled=true;
         if(steady){p.attack=Real(127);p.decay=Real(0);p.sustain_level=Real(0);}}
     for(unsigned v=0;v<voices;++v){patch.frequency=Real(110)*std::exp2(Real(v%36)/12);
+        if(staggered)for(auto& op:patch.operators){
+            op.attack=v%4==0?Real(80.25):Real(127);
+            op.decay=v%4==2?Real(0):Real(40.5);
+            op.sustain_level=v%4==2?Real(0):Real(64);
+        }
         if(!synth.set_voice(v,patch))std::abort();synth.key_on(v);}
     Real left[1024],right[1024];
     if(!block_size || block_size>1024 || 16384%block_size)std::abort();
+    if(staggered){
+        synth.render(left,right,256);
+        for(unsigned v=3;v<voices;v+=4)synth.key_off(v);
+    }
     if(released){
         patch.noise=true;patch.operators[3].release=Real(127);
         synth.set_voice(voices-1,patch);
@@ -44,6 +54,11 @@ template<class Real> void measure(const char* name, unsigned voices, bool lfo, u
 int main(int argc,char** argv){
     unsigned repeats=argc>1?unsigned(std::atoi(argv[1])):3;
     if(!repeats)return 1;
+    if(argc>2 && std::strcmp(argv[2],"mixed")==0){
+        measure<float>("mixed_envelopes",128,true,repeats,false,false,256,false,true);
+        measure<double>("mixed_envelopes",128,true,repeats,false,false,256,false,true);
+        return 0;
+    }
     if(argc>2){measure<double>("full_lfo",128,true,repeats);return 0;}
     measure<float>("idle",0,false,repeats);measure<double>("idle",0,false,repeats);
     measure<float>("released",128,true,repeats,true);measure<double>("released",128,true,repeats,true);
@@ -55,6 +70,8 @@ int main(int argc,char** argv){
     measure<float>("steady_dry",128,false,repeats,false,true);measure<double>("steady_dry",128,false,repeats,false,true);
     measure<float>("steady_lfo",128,true,repeats,false,true);measure<double>("steady_lfo",128,true,repeats,false,true);
     measure<float>("steady_pitch",128,true,repeats,false,true,256,true);measure<double>("steady_pitch",128,true,repeats,false,true,256,true);
+    measure<float>("mixed_envelopes",128,true,repeats,false,false,256,false,true);
+    measure<double>("mixed_envelopes",128,true,repeats,false,false,256,false,true);
     measure<float>("small_block",128,true,repeats,false,false,16);measure<double>("small_block",128,true,repeats,false,false,16);
     measure<float>("large_block",128,true,repeats,false,false,1024);measure<double>("large_block",128,true,repeats,false,false,1024);
 }
