@@ -569,15 +569,18 @@ template<class R> void steady_packets()
 
 template<class R> void dynamic_packets()
 {
-    for(model chip:{model::opm,model::opz})for(unsigned voices:{4u,5u,17u}) {
+    for(model chip:{model::opm,model::opz})for(unsigned voices:{4u,5u,17u})for(bool lfo:{false,true}) {
         fm_engine<R,128> packet(chip),reference(chip);
         voice_parameters<R> silent;silent.gain_left=silent.gain_right=R(0);
+        // The silent reference voice forces the general modulated path even
+        // when every audible voice has disabled LFOs.
+        silent.lfos[0].frequency=R(5);silent.lfos[0].pitch_cents=R(13);
         silent.operators[3].attack=R(0);reference.set_voice(0,silent);reference.key_on(0,8);
         std::array<voice_parameters<R>,128> patches;
         for(unsigned n=0;n<voices;++n){
             unsigned v=5+n;auto& p=patches[v];p.algorithm=n%8;p.feedback=R(83.5);
             p.frequency=R(117.25+n*7);p.gain_left=p.gain_right=R(0.02);
-            p.lfos[0].frequency=R(37);p.lfos[0].pitch_cents=R(31);p.lfos[0].amplitude=R(17);
+            p.lfos[0].frequency=R(37);p.lfos[0].pitch_cents=lfo?R(31):R(0);p.lfos[0].amplitude=lfo?R(17):R(0);
             for(unsigned o=0;o<4;++o){auto& op=p.operators[o];
                 op.waveform=chip==model::opz?(n+o)%8:0;
                 op.attack=R(80.25+7*o+n%3);op.decay=R(90.5+n%5);
@@ -599,6 +602,15 @@ template<class R> void dynamic_packets()
             CHECK(equal);
         };
         compare(257);compare(8192);
+        // Exercise block dispatch changes while envelopes continue running.
+        for(bool enable:{!lfo,lfo}) {
+            for(unsigned v=5;v<5+voices;++v){
+                patches[v].lfos[0].pitch_cents=enable?R(31):R(0);
+                patches[v].lfos[0].amplitude=enable?R(17):R(0);
+                packet.set_voice(v,patches[v]);reference.set_voice(v,patches[v]);
+            }
+            compare(257);
+        }
         for(unsigned v=5;v<5+voices;++v){packet.key_off(v);reference.key_off(v);}
         compare(257);compare(8192);
         for(unsigned v=5;v<5+voices;++v){

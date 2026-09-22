@@ -534,9 +534,9 @@ public:
         }
         prepare_steady_kernels();
         if (m_steady_ready[0] || m_steady_ready[1] || m_steady_ready[2] || m_steady_ready[3])
-            render_samples<true>(left, right, frames);
+            render_dispatch<true>(left, right, frames);
         else
-            render_samples<false>(left, right, frames);
+            render_dispatch<false>(left, right, frames);
         m_time += frames;
         for (unsigned i = 0; i < 2; ++i)
             for (std::size_t n = 0; n < m_lfo_count[i]; ++n)
@@ -732,19 +732,27 @@ private:
             if (m_awake[m_noise_live[n]]) m_noise_live[count++] = m_noise_live[n];
         m_noise_count = count;
     }
-    template<bool Steady> void render_samples(Real* left, Real* right, std::size_t frames)
+    template<bool Steady> void render_dispatch(Real* left, Real* right, std::size_t frames)
+    {
+        // Controls cannot change within a block. Without LFOs the general EG
+        // kernel can omit per-operator PM/AM loads and phase-step conversion.
+        // Keep the existing singleton kernel: specialization benefits polyphony.
+        if (m_live_count == 1 || m_lfo_count[0] || m_lfo_count[1]) render_samples<Steady, true>(left, right, frames);
+        else render_samples<Steady, false>(left, right, frames);
+    }
+    template<bool Steady, bool Modulated> void render_samples(Real* left, Real* right, std::size_t frames)
     {
         for (std::size_t s = 0; s < frames; ++s) {
-            if (m_lfo_count[0] || m_lfo_count[1]) modulation();
+            if (Modulated && (m_lfo_count[0] || m_lfo_count[1])) modulation();
             if (m_noise_count) noise_kernel();
             // A singleton specialization removes four loop prologues/backedges.
             // Recheck after each sample: retirement may change the live count.
             if (m_live_count == 1) {
-                operator_kernel<0, true, Steady>(); operator_kernel<1, true, Steady>();
-                operator_kernel<2, true, Steady>(); operator_kernel<3, true, Steady>();
+                operator_kernel<0, true, Steady, Modulated>(); operator_kernel<1, true, Steady, Modulated>();
+                operator_kernel<2, true, Steady, Modulated>(); operator_kernel<3, true, Steady, Modulated>();
             } else {
-                operator_kernel<0, false, Steady>(); operator_kernel<1, false, Steady>();
-                operator_kernel<2, false, Steady>(); operator_kernel<3, false, Steady>();
+                operator_kernel<0, false, Steady, Modulated>(); operator_kernel<1, false, Steady, Modulated>();
+                operator_kernel<2, false, Steady, Modulated>(); operator_kernel<3, false, Steady, Modulated>();
             }
             Real l = Real(0), r = Real(0);
             for (std::size_t n = 0; n < m_live_count; ++n) {
@@ -832,7 +840,7 @@ private:
             b.output[v] = m_wave.lookup(b.waveform[v], steady_phase<o, Pitch>(v)) * gain;
         }
     }
-    template<unsigned o, bool Single, bool Steady> void operator_kernel()
+    template<unsigned o, bool Single, bool Steady, bool Modulated> void operator_kernel()
     {
         if (Steady && !Single && m_steady_ready[o]) {
             if (m_steady_pitch[o]) {
@@ -886,10 +894,10 @@ private:
                 if (st != stage::attack) { st = stage::off; m_retire = true; }
             }
             uint64_t step = b.step[v];
-            if (b.pitch_modulated[v] && m_pm[v] != Real(0))
+            if (Modulated && b.pitch_modulated[v] && m_pm[v] != Real(0))
                 step = positive_phase_offset(static_cast<double>(b.frequency[v] * m_pitch_factor[v]) * m_inverse_rate);
             b.phase[v] += step;
-            Real attenuation = e * b.shift[v] + b.level[v] + (b.am[v] ? m_am[v] : Real(0));
+            Real attenuation = e * b.shift[v] + b.level[v] + (Modulated && b.am[v] ? m_am[v] : Real(0));
             if (st == stage::off || e >= Real(1023)) { b.output[v] = Real(0); continue; }
             if (o == 3 && m_noise[v]) {
                 b.output[v] = m_noise_value[v] * std::max(Real(0), Real(1023) - attenuation) * Real(0.000244140625);

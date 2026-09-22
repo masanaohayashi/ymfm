@@ -65,6 +65,9 @@ int main(int argc,char** argv){
     measure<float>("one",1,true,repeats);measure<double>("one",1,true,repeats);
     measure<float>("eight",8,true,repeats);measure<double>("eight",8,true,repeats);
     measure<float>("thirtytwo",32,true,repeats);measure<double>("thirtytwo",32,true,repeats);
+    measure<float>("one_dry",1,false,repeats);measure<double>("one_dry",1,false,repeats);
+    measure<float>("eight_dry",8,false,repeats);measure<double>("eight_dry",8,false,repeats);
+    measure<float>("thirtytwo_dry",32,false,repeats);measure<double>("thirtytwo_dry",32,false,repeats);
     measure<float>("full_dry",128,false,repeats);measure<double>("full_dry",128,false,repeats);
     measure<float>("full_lfo",128,true,repeats);measure<double>("full_lfo",128,true,repeats);
     measure<float>("steady_dry",128,false,repeats,false,true);measure<double>("steady_dry",128,false,repeats,false,true);
