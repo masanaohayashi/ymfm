@@ -55,6 +55,22 @@ template<class R> void wave_accuracy()
     CHECK(maximum < (sizeof(R) == 4 ? 1.5e-7L : 3e-12L));
 }
 
+template<class R> void wave_packets()
+{
+    const auto& table=wave_table<R>::instance();
+    constexpr unsigned width=wave_table<R>::packet_size;
+    unsigned waves[width];uint64_t phases[width];R gains[width],out[width];
+    uint64_t rng=9;
+    for(unsigned trial=0;trial<100000;++trial){
+        for(unsigned n=0;n<width;++n){
+            rng=rng*UINT64_C(6364136223846793005)+1;
+            phases[n]=rng;waves[n]=(trial+n)%8;gains[n]=R(0.123)*(R(n)+R(1));
+        }
+        table.lookup_packet(waves,phases,gains,out);
+        for(unsigned n=0;n<width;++n)CHECK(out[n]==table.lookup(waves[n],phases[n])*gains[n]);
+    }
+}
+
 template<class R> void phase_boundaries()
 {
     CHECK(phase_offset(R(0)) == 0);
@@ -461,9 +477,68 @@ template<class R> void held_envelope_edits()
     }
 }
 
+template<class R> void steady_packets()
+{
+    // The reference has a zero-frequency triangle pitch LFO at phase zero.
+    // It changes no samples, but keeps the general operator kernel selected.
+    for (unsigned voices : {3u,4u,5u,8u,17u,123u}) {
+        fm_engine<R,128> packet(model::opz),reference(model::opz);
+        std::array<voice_parameters<R>,128> patches;
+        for(unsigned n=0;n<voices;++n){
+            unsigned v=n+5;auto& p=patches[v];
+            p.algorithm=n%8;p.feedback=R(n%100);p.frequency=R(73.5+3*n);
+            p.gain_left=R(0.007);p.gain_right=R(0.009);
+            for(unsigned o=0;o<4;++o){
+                auto& op=p.operators[o];op.waveform=(n+o)%8;
+                op.total_level=R(13.25*o);op.envelope_shift=R(0.25*o);
+                // One exact decay increment gives a nonzero held attenuation.
+                op.decay=R(127);op.sustain_level=R(0.1);
+                op.release=R(127);op.am_enabled=true;
+            }
+            CHECK(packet.set_voice(v,p));
+            auto q=p;q.lfos[1].pitch_cents=R(1);
+            CHECK(reference.set_voice(v,q));
+            CHECK(packet.key_on(v));CHECK(reference.key_on(v));
+        }
+        std::vector<R> a(4096),b(4096),c(4096),d(4096);
+        auto compare=[&](unsigned frames){
+            allocations=0;watch_allocation=true;
+            CHECK(packet.render(a.data(),b.data(),frames));
+            CHECK(reference.render(c.data(),d.data(),frames));
+            watch_allocation=false;CHECK(allocations==0);
+            for(unsigned n=0;n<frames;++n){CHECK(a[n]==c[n]);CHECK(b[n]==d[n]);}
+            for(unsigned v=5;v<5+voices;++v)for(unsigned o=0;o<4;++o){
+                CHECK(packet.phase(v,o)==reference.phase(v,o));
+                CHECK(packet.attenuation(v,o)==reference.attenuation(v,o));
+            }
+        };
+        compare(1); // settle envelopes, then enter the packet path next block
+        compare(257);compare(4096);
+        auto edit=[&](unsigned v){
+            CHECK(packet.set_voice(v,patches[v]));
+            auto p=patches[v];p.lfos[1].pitch_cents=R(1);
+            CHECK(reference.set_voice(v,p));
+        };
+        patches[5].operators[3].total_level=R(43.75);edit(5);compare(256);
+        patches[6].noise=true;edit(6);compare(256);
+        patches[6].noise=false;edit(6);compare(256);
+        // A real LFO must invalidate the block's constant-gain eligibility.
+        patches[5].lfos[0].frequency=R(7);patches[5].lfos[0].amplitude=R(19);
+        edit(5);compare(257);
+        patches[5].lfos[0].amplitude=R(0);edit(5);compare(257);
+        // Release just one operator: other operators initially remain eligible.
+        // Retirement of its voice later splits the contiguous run mid-block.
+        CHECK(packet.key_off(6,1));CHECK(reference.key_off(6,1));compare(256);
+        CHECK(packet.key_off(6));CHECK(reference.key_off(6));compare(4096);
+        CHECK(!packet.active(6));CHECK(!reference.active(6));compare(257);
+        CHECK(packet.key_on(6));CHECK(reference.key_on(6));compare(1);compare(257);
+    }
+}
+
 int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
+    wave_packets<float>();wave_packets<double>();
     phase_boundaries<float>();phase_boundaries<double>();
     algorithms<float>();algorithms<double>();
     envelopes<float>();envelopes<double>();
@@ -475,6 +550,7 @@ int main()
     exponential_accuracy<float>();exponential_accuracy<double>();
     singleton_transition<float>();singleton_transition<double>();
     held_envelope_edits<float>();held_envelope_edits<double>();
+    steady_packets<float>();steady_packets<double>();
     sleeping_random();sleeping_voices<float>();sleeping_voices<double>();
     std::printf("%u failures\n",failures);
     return failures?1:0;

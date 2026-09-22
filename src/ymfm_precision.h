@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 
@@ -94,6 +95,36 @@ template<class Real> inline uint64_t phase_step(Real hz, Real sample_rate)
     return phase_offset(static_cast<double>(hz) * (1.0 / static_cast<double>(sample_rate)));
 }
 
+// Native 128-bit packets on AArch64/Clang; keep a scalar build for cross-checking.
+// This does not change the precision of any lane.
+template<class Real> struct wave_packet;
+#if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
+template<> struct wave_packet<float> {
+    using type = float __attribute__((vector_size(16)));
+    static type load(const float* p) { type v; std::memcpy(&v,p,sizeof(v)); return v; }
+    static void gather(const float* const* c, type& c0, type& c1, type& c2, type& c3) {
+        type a=load(c[0]), b=load(c[1]), d=load(c[2]), e=load(c[3]);
+        type ab0=__builtin_shufflevector(a,b,0,4,1,5);
+        type ab1=__builtin_shufflevector(a,b,2,6,3,7);
+        type de0=__builtin_shufflevector(d,e,0,4,1,5);
+        type de1=__builtin_shufflevector(d,e,2,6,3,7);
+        c0=__builtin_shufflevector(ab0,de0,0,1,4,5);
+        c1=__builtin_shufflevector(ab0,de0,2,3,6,7);
+        c2=__builtin_shufflevector(ab1,de1,0,1,4,5);
+        c3=__builtin_shufflevector(ab1,de1,2,3,6,7);
+    }
+};
+template<> struct wave_packet<double> {
+    using type = double __attribute__((vector_size(16)));
+    static type load(const double* p) { type v; std::memcpy(&v,p,sizeof(v)); return v; }
+    static void gather(const double* const* c, type& c0, type& c1, type& c2, type& c3) {
+        type a=load(c[0]), b=load(c[1]), d=load(c[0]+2), e=load(c[1]+2);
+        c0=__builtin_shufflevector(a,b,0,2); c1=__builtin_shufflevector(a,b,1,3);
+        c2=__builtin_shufflevector(d,e,0,2); c3=__builtin_shufflevector(d,e,1,3);
+    }
+};
+#endif
+
 // Cubic Hermite segments, with one-sided derivatives at the OPZ wave corners.
 // Values and polynomial coefficients are Real, not converted chip log-ROMs.
 // Keep one segment's four coefficients together to fetch a single cache line.
@@ -114,6 +145,29 @@ public:
         Real t = Real(phase & mask) * Real(1.0 / 4503599627370496.0);
         return ((m_c[wave][index][3] * t + m_c[wave][index][2]) * t
                 + m_c[wave][index][1]) * t + m_c[wave][index][0];
+    }
+    static constexpr unsigned packet_size = 16 / sizeof(Real);
+    void lookup_packet(const unsigned* waves, const uint64_t* phases,
+                       const Real* gains, Real* output) const
+    {
+#if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
+        using vector = typename wave_packet<Real>::type;
+        vector t{}, c0, c1, c2, c3, gain;
+        const Real* coefficients[packet_size];
+        for (unsigned n = 0; n < packet_size; ++n) {
+            unsigned index = unsigned(phases[n] >> (64 - bits));
+            constexpr uint64_t mask = (uint64_t(1) << (64 - bits)) - 1;
+            t[n] = Real(phases[n] & mask) * Real(1.0 / 4503599627370496.0);
+            coefficients[n] = m_c[waves[n]][index];
+        }
+        wave_packet<Real>::gather(coefficients, c0, c1, c2, c3);
+        std::memcpy(&gain, gains, sizeof(gain));
+        vector result = (((c3 * t + c2) * t + c1) * t + c0) * gain;
+        std::memcpy(output, &result, sizeof(result));
+#else
+        for (unsigned n = 0; n < packet_size; ++n)
+            output[n] = lookup(waves[n], phases[n]) * gains[n];
+#endif
     }
 private:
     wave_table()
@@ -453,38 +507,11 @@ public:
             m_time += frames;
             return true;
         }
-        for (std::size_t s = 0; s < frames; ++s) {
-            if (m_lfo_count[0] || m_lfo_count[1]) modulation();
-            if (m_noise_count) noise_kernel();
-            // A singleton specialization removes four loop prologues/backedges.
-            // Recheck after each sample: retirement may change the live count.
-            if (m_live_count == 1) {
-                operator_kernel<0, true>(); operator_kernel<1, true>();
-                operator_kernel<2, true>(); operator_kernel<3, true>();
-            } else {
-                operator_kernel<0, false>(); operator_kernel<1, false>();
-                operator_kernel<2, false>(); operator_kernel<3, false>();
-            }
-            Real l = Real(0), r = Real(0);
-            for (std::size_t n = 0; n < m_live_count; ++n) {
-                std::size_t v = m_live[n];
-                Real sum = m_op[3].output[v];
-                for (unsigned o = 0; o < 3; ++o)
-                    if (m_carriers[v] & (1u << o)) sum += m_op[o].output[v];
-                m_feedback0[v] = m_feedback1[v];
-                m_feedback1[v] = m_op[0].output[v];
-                l += sum * m_left[v]; r += sum * m_right[v];
-            }
-            left[s] = l; right[s] = r;
-            if (m_retire) {
-                retire_finished(m_time + s + 1);
-                if (!m_live_count) {
-                    std::fill_n(left + s + 1, frames - s - 1, Real(0));
-                    std::fill_n(right + s + 1, frames - s - 1, Real(0));
-                    break;
-                }
-            }
-        }
+        prepare_steady_kernels();
+        if (m_steady_ready[0] || m_steady_ready[1] || m_steady_ready[2] || m_steady_ready[3])
+            render_samples<true>(left, right, frames);
+        else
+            render_samples<false>(left, right, frames);
         m_time += frames;
         for (unsigned i = 0; i < 2; ++i)
             for (std::size_t n = 0; n < m_lfo_count[i]; ++n)
@@ -656,6 +683,7 @@ private:
     void retire_finished(uint64_t now)
     {
         m_retire = false;
+        m_steady_ready.fill(false); // retirement can split a contiguous run
         std::size_t count = 0;
         for (std::size_t n = 0; n < m_live_count; ++n) {
             std::size_t v = m_live[n];
@@ -679,8 +707,89 @@ private:
             if (m_awake[m_noise_live[n]]) m_noise_live[count++] = m_noise_live[n];
         m_noise_count = count;
     }
-    template<unsigned o, bool Single> void operator_kernel()
+    template<bool Steady> void render_samples(Real* left, Real* right, std::size_t frames)
     {
+        for (std::size_t s = 0; s < frames; ++s) {
+            if (m_lfo_count[0] || m_lfo_count[1]) modulation();
+            if (m_noise_count) noise_kernel();
+            // A singleton specialization removes four loop prologues/backedges.
+            // Recheck after each sample: retirement may change the live count.
+            if (m_live_count == 1) {
+                operator_kernel<0, true, Steady>(); operator_kernel<1, true, Steady>();
+                operator_kernel<2, true, Steady>(); operator_kernel<3, true, Steady>();
+            } else {
+                operator_kernel<0, false, Steady>(); operator_kernel<1, false, Steady>();
+                operator_kernel<2, false, Steady>(); operator_kernel<3, false, Steady>();
+            }
+            Real l = Real(0), r = Real(0);
+            for (std::size_t n = 0; n < m_live_count; ++n) {
+                std::size_t v = m_live[n];
+                Real sum = m_op[3].output[v];
+                for (unsigned o = 0; o < 3; ++o)
+                    if (m_carriers[v] & (1u << o)) sum += m_op[o].output[v];
+                m_feedback0[v] = m_feedback1[v];
+                m_feedback1[v] = m_op[0].output[v];
+                l += sum * m_left[v]; r += sum * m_right[v];
+            }
+            left[s] = l; right[s] = r;
+            if (m_retire) {
+                retire_finished(m_time + s + 1);
+                if (!m_live_count) {
+                    std::fill_n(left + s + 1, frames - s - 1, Real(0));
+                    std::fill_n(right + s + 1, frames - s - 1, Real(0));
+                    break;
+                }
+            }
+        }
+    }
+    void prepare_steady_kernels()
+    {
+        m_steady_ready.fill(false);
+        // A constant envelope and absent LFOs make the gain invariant for this
+        // block. Parameter edits are applied only between render calls.
+        if (m_live_count < wave_table<Real>::packet_size || m_lfo_count[0] || m_lfo_count[1]) return;
+        m_steady_first = m_live[0];
+        if (m_live[m_live_count - 1] != m_steady_first + m_live_count - 1) return;
+        for (unsigned o = 0; o < 4; ++o) {
+            if (o == 3 && m_noise_count) continue;
+            auto& b = m_op[o];
+            bool held = true;
+            for (std::size_t n = 0; n < m_live_count; ++n)
+                if (b.state[m_steady_first + n] != stage::sustain_hold) { held = false; break; }
+            if (!held) continue;
+            m_steady_ready[o] = true;
+            for (std::size_t n = 0; n < m_live_count; ++n) {
+                std::size_t v = m_steady_first + n;
+                m_steady_gain[o][v] = m_exp.lookup(-(b.attenuation[v] * b.shift[v] + b.level[v]) * Real(0.015625));
+            }
+        }
+    }
+    template<unsigned o> uint64_t steady_phase(std::size_t v)
+    {
+        auto& b = m_op[o];
+        b.phase[v] += b.step[v];
+        Real offset = Real(0);
+        if (o == 0) offset = (m_feedback0[v] + m_feedback1[v]) * m_feedback_scale[v];
+        else for (unsigned j = 0; j < o; ++j)
+            if (m_routes[o - 1][v] & (1u << j)) offset += m_op[j].output[v] * Real(4);
+        return b.phase[v] + bounded_phase_offset(offset);
+    }
+    template<unsigned o> void steady_kernel()
+    {
+        constexpr unsigned width = wave_table<Real>::packet_size;
+        auto& b = m_op[o];
+        std::size_t v = m_steady_first, end = v + m_live_count;
+        for (; v + width <= end; v += width) {
+            uint64_t phases[width];
+            for (unsigned n = 0; n < width; ++n) phases[n] = steady_phase<o>(v + n);
+            m_wave.lookup_packet(&b.waveform[v], phases, &m_steady_gain[o][v], &b.output[v]);
+        }
+        for (; v < end; ++v)
+            b.output[v] = m_wave.lookup(b.waveform[v], steady_phase<o>(v)) * m_steady_gain[o][v];
+    }
+    template<unsigned o, bool Single, bool Steady> void operator_kernel()
+    {
+        if (Steady && !Single && m_steady_ready[o]) { steady_kernel<o>(); return; }
         auto& b = m_op[o];
         for (std::size_t n = 0; n < (Single ? 1 : m_live_count); ++n) {
             std::size_t v = m_live[n];
@@ -741,6 +850,9 @@ private:
             b.output[v] = m_wave.lookup(b.waveform[v], lookup) * m_exp.lookup(-attenuation * Real(0.015625));
         }
     }
+    std::array<bool, 4> m_steady_ready{};
+    std::array<lanes<Real>, 4> m_steady_gain{};
+    std::size_t m_steady_first = 0;
     model m_model;
     const wave_table<Real>& m_wave;
     const exponential_table<Real>& m_exp;
