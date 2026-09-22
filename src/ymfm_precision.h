@@ -456,8 +456,15 @@ public:
         for (std::size_t s = 0; s < frames; ++s) {
             if (m_lfo_count[0] || m_lfo_count[1]) modulation();
             if (m_noise_count) noise_kernel();
-            operator_kernel<0>(); operator_kernel<1>();
-            operator_kernel<2>(); operator_kernel<3>();
+            // A singleton specialization removes four loop prologues/backedges.
+            // Recheck after each sample: retirement may change the live count.
+            if (m_live_count == 1) {
+                operator_kernel<0, true>(); operator_kernel<1, true>();
+                operator_kernel<2, true>(); operator_kernel<3, true>();
+            } else {
+                operator_kernel<0, false>(); operator_kernel<1, false>();
+                operator_kernel<2, false>(); operator_kernel<3, false>();
+            }
             Real l = Real(0), r = Real(0);
             for (std::size_t n = 0; n < m_live_count; ++n) {
                 std::size_t v = m_live[n];
@@ -670,10 +677,10 @@ private:
             if (m_awake[m_noise_live[n]]) m_noise_live[count++] = m_noise_live[n];
         m_noise_count = count;
     }
-    template<unsigned o> void operator_kernel()
+    template<unsigned o, bool Single> void operator_kernel()
     {
         auto& b = m_op[o];
-        for (std::size_t n = 0; n < m_live_count; ++n) {
+        for (std::size_t n = 0; n < (Single ? 1 : m_live_count); ++n) {
             std::size_t v = m_live[n];
             Real& e = b.attenuation[v]; stage& st = b.state[v];
             // Carry sub-ULP increments rather than letting slow float32 EGs stall.

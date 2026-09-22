@@ -389,6 +389,43 @@ template<class R> void sleeping_voices()
     for(auto x:large)CHECK(x==R(0));
 }
 
+// Compare the singleton kernel with the general kernel carrying an inaudible
+// second voice, including retirement of that voice inside a render block.
+template<class R> void singleton_transition()
+{
+    for (unsigned algorithm=0;algorithm<8;++algorithm) {
+        fm_engine<R,128> one(model::opz),two(model::opz);
+        voice_parameters<R> patch;
+        patch.algorithm=algorithm;patch.feedback=R(80);patch.frequency=R(137.25);
+        patch.lfos[0].frequency=R(37);patch.lfos[0].pitch_cents=R(23);
+        patch.lfos[1].frequency=R(91);patch.lfos[1].amplitude=R(17);
+        for(unsigned o=0;o<4;++o){
+            patch.operators[o].waveform=(algorithm+o)%8;
+            patch.operators[o].am_enabled=true;
+            patch.operators[o].total_level=R(9*o);
+        }
+        CHECK(one.set_voice(127,patch));CHECK(two.set_voice(127,patch));
+        one.key_on(127);two.key_on(127);
+        patch.gain_left=patch.gain_right=R(0);
+        for(auto& op:patch.operators)op.release=R(127);
+        CHECK(two.set_voice(0,patch));two.key_on(0);
+        std::vector<R> a(8192),b(8192),c(8192),d(8192);
+        auto compare=[&](unsigned frames){
+            CHECK(one.render(a.data(),b.data(),frames));
+            CHECK(two.render(c.data(),d.data(),frames));
+            for(unsigned s=0;s<frames;++s){CHECK(a[s]==c[s]);CHECK(b[s]==d[s]);}
+            for(unsigned o=0;o<4;++o){
+                CHECK(one.phase(127,o)==two.phase(127,o));
+                CHECK(one.attenuation(127,o)==two.attenuation(127,o));
+            }
+        };
+        compare(257);two.key_off(0);compare(8192);
+        CHECK(!two.active(0));compare(257);
+        // Re-enter the general kernel without disturbing the audible voice.
+        two.key_on(0);compare(257);
+    }
+}
+
 int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
@@ -401,6 +438,7 @@ int main()
     noise_clock<float>();noise_clock<double>();
     double_is_double();imports();
     exponential_accuracy<float>();exponential_accuracy<double>();
+    singleton_transition<float>();singleton_transition<double>();
     sleeping_random();sleeping_voices<float>();sleeping_voices<double>();
     std::printf("%u failures\n",failures);
     return failures?1:0;
