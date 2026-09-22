@@ -1,3 +1,17 @@
+# ymfmplus
+
+OPM (YM2151) / OPZ (YM2414) 用の高精度演算コアを追加しています。
+既存のymfmコアはそのまま利用できます。
+
+- `float` / `double` を選択できる音声演算と波形テーブル
+- 64 bit整数位相、波形の3次補間、連続EG・フィードバック・ミックス
+- 将来のSIMD化を考慮したSoA配置、最大128個のボイススロット
+- [使用方法と検証](docs/high-precision.md) / [全体設計](docs/extended-engine-design.md)
+
+以下は上流ymfmのREADMEです。
+
+---
+
 # ymfm
 
 <div style='text-align:center;margin:auto'>
