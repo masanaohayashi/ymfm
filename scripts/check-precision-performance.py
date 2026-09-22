@@ -8,11 +8,13 @@ import subprocess
 import tempfile
 import sys
 import statistics
+import os
 
 root = pathlib.Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('reference', nargs='?', default='00e09ac')
 parser.add_argument('--repeats', type=int, default=3)
+parser.add_argument('--cpu-time', action='store_true', help='Measure process CPU time in the single-threaded benchmark instead of wall time')
 parser.add_argument('--rounds', type=int, default=1, help='Alternate baseline/current order across measurement rounds')
 parser.add_argument('--case', action='append', help='Case to evaluate; repeat to select several')
 parser.add_argument('--min-speedup', type=float, help='Override the original regression thresholds')
@@ -20,6 +22,10 @@ args = parser.parse_args()
 if args.repeats < 1 or args.rounds < 1:
     parser.error('--repeats and --rounds must be positive')
 reference = args.reference
+benchmark_env=os.environ.copy()
+benchmark_env.pop('YMFM_BENCH_CPU_TIME',None)
+if args.cpu_time:benchmark_env['YMFM_BENCH_CPU_TIME']='1'
+print('Timing: '+('process CPU time' if args.cpu_time else 'wall time'),flush=True)
 with tempfile.TemporaryDirectory(prefix='ymfm-perf-') as temporary:
     directory=pathlib.Path(temporary)
     (directory/'ymfm_precision.h').write_bytes(subprocess.check_output(
@@ -34,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='ymfm-perf-') as temporary:
         for name in order:
             command=[str(directory/name),str(args.repeats)]
             if args.case:command+=['--cases',*args.case]
-            for line in subprocess.check_output(command,text=True).splitlines():
+            for line in subprocess.check_output(command,text=True,env=benchmark_env).splitlines():
                 case,elapsed,checksum=line.split()
                 outputs[name].setdefault(case,[]).append(float(elapsed))
     outputs={name:{case:statistics.median(samples) for case,samples in cases.items()}

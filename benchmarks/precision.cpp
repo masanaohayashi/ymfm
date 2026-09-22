@@ -5,11 +5,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <ctime>
 
 static int selected_count = 0;
 static char** selected_cases = nullptr;
 
-template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256, bool pitch_only=false, bool staggered=false)
+template<class Real> void measure(const char* name, unsigned voices, bool lfo, unsigned repeats, bool released=false, bool steady=false, unsigned block_size=256, bool pitch_only=false, bool staggered=false, unsigned envelope_case=0)
 {
     char case_name[80];
     std::snprintf(case_name,sizeof(case_name),"%s_%s",sizeof(Real)==4?"f32":"f64",name);
@@ -28,6 +29,8 @@ template<class Real> void measure(const char* name, unsigned voices, bool lfo, u
     for(unsigned op=0;op<4;++op){auto& p=patch.operators[op];p.waveform=op;p.ratio=Real(op+1);
         p.attack=Real(100.25);p.decay=Real(40.5);p.sustain_level=Real(64);
         p.total_level=Real(12*op);p.am_enabled=true;
+        if(envelope_case==1)p.attack=Real(40);
+        if(envelope_case==2){p.attack=Real(127);p.decay=Real(0);p.sustain_level=Real(0);p.release=Real(40);}
         if(steady){p.attack=Real(127);p.decay=Real(0);p.sustain_level=Real(0);}}
     for(unsigned v=0;v<voices;++v){patch.frequency=Real(110)*std::exp2(Real(v%36)/12);
         if(staggered)for(auto& op:patch.operators){
@@ -50,13 +53,30 @@ template<class Real> void measure(const char* name, unsigned voices, bool lfo, u
         for(unsigned n=0;n<256;++n)synth.render(left,right,256);
         for(unsigned v=0;v<voices;++v)if(synth.active(v))std::abort();
     }
+    const bool cpu_time=std::getenv("YMFM_BENCH_CPU_TIME")!=nullptr;
     std::vector<double> times;
     double checksum=0;
     for(unsigned rep=0;rep<repeats;++rep){
+        if(envelope_case==2)for(unsigned v=0;v<voices;++v){synth.key_on(v);synth.key_off(v);}
         auto start=std::chrono::steady_clock::now();
+        std::clock_t cpu_start=cpu_time?std::clock():0;
         for(unsigned block=0;block<16384/block_size;++block){synth.render(left,right,block_size);
             for(unsigned s=0;s<block_size;++s)checksum+=double(left[s])*double(left[s]);}
-        times.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
+        double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+        if(cpu_time){
+            std::clock_t cpu_end=std::clock();
+            if(cpu_start==std::clock_t(-1) || cpu_end==std::clock_t(-1))std::abort();
+            elapsed=double(cpu_end-cpu_start)/CLOCKS_PER_SEC;
+        }
+        times.push_back(elapsed);
+        if(envelope_case)for(unsigned v=0;v<voices;++v)for(unsigned o=0;o<4;++o){
+            Real a=synth.attenuation(v,o);
+            if(!synth.active(v) || (envelope_case==1 && a<=Real(0)) ||
+               (envelope_case==2 && (a<=Real(0) || a>=Real(192)))){
+                std::fprintf(stderr,"%s left target EG stage: rep=%u attenuation=%g\n",case_name,rep,double(a));
+                std::abort();
+            }
+        }
     }
     std::sort(times.begin(),times.end());
     std::printf("%s_%s %.9f %.12g\n",sizeof(Real)==4?"f32":"f64",name,times[times.size()/2],checksum);
@@ -82,6 +102,10 @@ int main(int argc,char** argv){
     measure<float>("one_dry",1,false,repeats);measure<double>("one_dry",1,false,repeats);
     measure<float>("eight_dry",8,false,repeats);measure<double>("eight_dry",8,false,repeats);
     measure<float>("thirtytwo_dry",32,false,repeats);measure<double>("thirtytwo_dry",32,false,repeats);
+    measure<float>("attack_lfo",128,true,repeats,false,false,256,false,false,1);
+    measure<double>("attack_lfo",128,true,repeats,false,false,256,false,false,1);
+    measure<float>("release_lfo",128,true,repeats,false,false,256,false,false,2);
+    measure<double>("release_lfo",128,true,repeats,false,false,256,false,false,2);
     measure<float>("full_dry",128,false,repeats);measure<double>("full_dry",128,false,repeats);
     measure<float>("full_lfo",128,true,repeats);measure<double>("full_lfo",128,true,repeats);
     measure<float>("steady_dry",128,false,repeats,false,true);measure<double>("steady_dry",128,false,repeats,false,true);

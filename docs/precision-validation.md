@@ -363,3 +363,30 @@ Release CTest 5/5、ASan/UBSan/float-cast-overflow、厳格警告、
 ```sh
 python3 scripts/check-precision-performance.py cd3f544 --repeats 5 --rounds 4 --min-speedup 0.97
 ```
+
+## アタック・発音中リリースの測定追加（2026-09-23）
+
+`attack_lfo`と`release_lfo`を追加。いずれも128ボイス・全4オペレーター・LFOあり。
+アタックはレート40で開始し、測定終了時にアタックが終わっていないことを検査する。
+リリースは最大attackでKey OnしてからKey Offし、レート40で減衰させる。
+各測定前に再発音するため、繰り返しの途中でreverbや無音の計測へ変わらない。
+発音が終了したり、OPZのreverb閾値192へ到達した場合は測定を中止する。
+これらの準備と検査は計測区間の外で行う。
+
+当日の同一ヘッダー比較では4〜20%の差が観測された。ParallelsのCPU使用率が
+約400%であることを確認したが、他アプリへの操作はしていない。
+ベンチマークだけにmacOSのUSER_INITIATED QoSを設定した試行でも6〜9%の差が
+残ったため、このQoS変更は採用していない。音源本体も変更していない。
+
+比較スクリプトに`--cpu-time`を追加。単一スレッドのベンチマークのプロセスCPU時間
+（`std::clock`）を計測し、スケジューリングで待たされた時間を除いた補助指標とする。
+既定は従来どおり実時間であり、表示にもどちらを測ったか明記する。
+CPU時間でも同一ヘッダー間にfloat64 release_lfoで約6%の差が残った。
+CPU時間は周波数・コア配置・キャッシュ競合などの影響を除くものではなく、
+リアルタイムの締切を守れることの証明にもならない。現在の負荷下では数%の改善を
+採否判断できないため、アタック／リリースの追加最適化は採用していない。
+
+```sh
+python3 scripts/check-precision-performance.py a682026 --repeats 5 --rounds 4 --case f32_attack_lfo --case f64_attack_lfo --case f32_release_lfo --case f64_release_lfo --min-speedup 0.97
+python3 scripts/check-precision-performance.py a682026 --repeats 3 --rounds 4 --cpu-time --case f32_release_lfo --case f64_release_lfo --min-speedup 0.97
+```
