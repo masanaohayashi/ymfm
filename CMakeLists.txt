@@ -19,6 +19,11 @@ if(BUILD_TESTING)
     add_executable(ymfm_original_regression tests/original_regression.cpp)
     target_link_libraries(ymfm_original_regression PRIVATE ymfm)
     add_test(NAME original_regression COMMAND ymfm_original_regression)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND AND UNIX)
+        add_test(NAME render_kernel_audit COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-render-kernel.py ${CMAKE_CXX_COMPILER})
+    endif()
 endif()
 
 add_executable(ymfm_precision_example examples/precision/render.cpp)

@@ -304,6 +304,91 @@ void imports()
     fm_engine<double,1> e(model::opz);CHECK(e.set_voice(0,p));
 }
 
+template<class R> void exponential_accuracy()
+{
+    const auto& table=exponential_table<R>::instance();
+    long double worst=0;
+    for(unsigned i=0;i<=300000;++i){
+        R x=R(-64)+R(80)*R(i)/R(300000);
+        long double reference=std::exp2(static_cast<long double>(x));
+        worst=std::max(worst,std::abs(static_cast<long double>(table.lookup(x))/reference-1));
+    }
+    std::printf("exponential %s max relative error %.12Lg\n",sizeof(R)==4?"f32":"f64",worst);
+    CHECK(worst<(sizeof(R)==4?2e-7L:4e-15L));
+    for(int k=-4096;k<=1024;++k){
+        R x=R(k)/R(64);
+        CHECK(std::abs(table.lookup(x)/std::exp2(x)-R(1))<R(4)*std::numeric_limits<R>::epsilon());
+    }
+}
+
+void sleeping_random()
+{
+    const auto& jump=random_jump_table::instance();
+    for(uint32_t seed:{1u,123u,0xdeadbeefu}){
+        uint32_t state=seed;
+        for(unsigned n=0;n<10000;++n){
+            if(n%113==0)CHECK(jump.advance(seed,n)==state);
+            random_jump_table::next(state);
+        }
+        CHECK(jump.advance(seed,UINT64_C(4294967295))==seed);
+        CHECK(jump.advance(seed,UINT64_C(0x123456789abcdef0))==
+              jump.advance(jump.advance(seed,UINT64_C(0x1234567800000000)),UINT64_C(0x9abcdef0)));
+    }
+#if defined(__SIZEOF_INT128__)
+    uint64_t a=1,b=9;
+    for(unsigned i=0;i<10000;++i){
+        a=a*UINT64_C(6364136223846793005)+1;b=b*UINT64_C(1442695040888963407)+1;
+        CHECK(multiply_high(a,b)==uint64_t((__uint128_t(a)*b)>>64));
+    }
+#endif
+}
+
+template<class R> void sleeping_voices()
+{
+    fm_engine<R,128> asleep(model::opz),running(model::opz);
+    voice_parameters<R> p;
+    p.lfos[0].frequency=R(700);p.lfos[0].pitch_cents=R(12);
+    p.lfos[0].waveform=lfo_wave::noise;p.lfos[0].key_sync=false;
+    p.lfos[1].frequency=R(317);p.lfos[1].amplitude=R(14);
+    p.lfos[1].waveform=lfo_wave::sine;p.lfos[1].key_sync=false;
+    p.operators[3].am_enabled=true;
+    p.operators[3].release=R(127);
+    asleep.set_voice(127,p);running.set_voice(127,p);running.key_on(127,8);
+    R a[256],b[256],c[256],d[256];
+    for(unsigned n=0;n<200;++n){asleep.render(a,b,256);running.render(c,d,256);}
+    asleep.key_on(127,8);running.key_on(127,8);
+    asleep.render(a,b,256);running.render(c,d,256);
+    for(unsigned i=0;i<256;++i)CHECK(a[i]==c[i]);
+    // Disable and later re-enable an LFO, preserving its free-running clock.
+    p.lfos[0].pitch_cents=R(0);asleep.set_voice(127,p);running.set_voice(127,p);
+    asleep.key_off(127);running.key_off(127);
+    for(unsigned n=0;n<50;++n){asleep.render(a,b,256);running.render(c,d,256);}
+    CHECK(!asleep.active(127));CHECK(!running.active(127));
+    p.lfos[0].pitch_cents=R(12);asleep.set_voice(127,p);running.set_voice(127,p);
+    asleep.key_on(127,8);running.key_on(127,8);
+    asleep.render(a,b,256);running.render(c,d,256);
+    for(unsigned i=0;i<256;++i)CHECK(a[i]==c[i]);
+
+    // Finish a release in a large block vs one sample at a time. A subsequent
+    // free-running noise LFO key-on must agree across both retirement paths.
+    asleep.key_off(127);running.key_off(127);
+    std::vector<R> large(8192),other(8192);
+    asleep.render(large.data(),other.data(),8192);
+    for(unsigned n=0;n<8192;++n){running.render(c,d,1);CHECK(c[0]==large[n]);}
+    CHECK(!asleep.active(127));CHECK(!running.active(127));
+    asleep.key_on(127,8);running.key_on(127,8);
+    asleep.render(a,b,256);running.render(c,d,256);
+    for(unsigned i=0;i<256;++i)CHECK(a[i]==c[i]);
+
+    // All ended, even with noise enabled: silence and unchanged operator phase.
+    p.noise=true;asleep.set_voice(127,p);asleep.key_off(127);
+    asleep.render(large.data(),other.data(),8192);CHECK(!asleep.active(127));
+    uint64_t phase=asleep.phase(127,3);
+    asleep.render(large.data(),other.data(),8192);
+    CHECK(asleep.phase(127,3)==phase);
+    for(auto x:large)CHECK(x==R(0));
+}
+
 int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
@@ -315,6 +400,8 @@ int main()
     validation_and_opz<float>();validation_and_opz<double>();
     noise_clock<float>();noise_clock<double>();
     double_is_double();imports();
+    exponential_accuracy<float>();exponential_accuracy<double>();
+    sleeping_random();sleeping_voices<float>();sleeping_voices<double>();
     std::printf("%u failures\n",failures);
     return failures?1:0;
 }

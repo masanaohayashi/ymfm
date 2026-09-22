@@ -61,10 +61,29 @@ template<class Real> struct numeric_type {
 template<class Real> inline uint64_t phase_offset(Real turns)
 {
     if (!std::isfinite(turns)) return 0;
-    Real fraction = std::fmod(turns, Real(1));
-    Real magnitude = std::abs(fraction);
-    uint64_t bits = static_cast<uint64_t>(std::ldexp(magnitude, 64));
+    Real magnitude = std::abs(turns);
+    // Above this limit every representable value is already an integer.
+    constexpr Real integral_limit = std::is_same<Real, float>::value
+        ? Real(8388608.0) : Real(4503599627370496.0);
+    if (magnitude >= integral_limit) return 0;
+    Real fraction = magnitude - Real(static_cast<uint64_t>(magnitude));
+    uint64_t bits = static_cast<uint64_t>(fraction * Real(18446744073709551616.0));
+    return turns < Real(0) ? uint64_t(0) - bits : bits;
+}
+
+// Render-only conversions. Parameter validation bounds PM offsets to +/-16
+// turns and modulated oscillator increments below 2^52 turns/sample.
+// Public phase_offset() retains its finite/large-input checks.
+template<class Real> inline uint64_t bounded_phase_offset(Real turns)
+{
+    Real fraction = turns - Real(static_cast<int64_t>(turns));
+    uint64_t bits = static_cast<uint64_t>(std::abs(fraction) * Real(18446744073709551616.0));
     return fraction < Real(0) ? uint64_t(0) - bits : bits;
+}
+inline uint64_t positive_phase_offset(double turns)
+{
+    double fraction = turns - static_cast<double>(static_cast<uint64_t>(turns));
+    return static_cast<uint64_t>(fraction * 18446744073709551616.0);
 }
 
 template<class Real> inline uint64_t phase_step(Real hz, Real sample_rate)
@@ -72,12 +91,13 @@ template<class Real> inline uint64_t phase_step(Real hz, Real sample_rate)
     // Phase conversion is a numeric boundary, not an audio sample operation.
     // Keep the division at least binary64 even for binary32 audio, otherwise
     // the Q0.64 accumulator would inherit a 24-bit frequency increment.
-    return phase_offset(static_cast<double>(hz) / static_cast<double>(sample_rate));
+    return phase_offset(static_cast<double>(hz) * (1.0 / static_cast<double>(sample_rate)));
 }
 
 // Cubic Hermite segments, with one-sided derivatives at the OPZ wave corners.
 // Values and polynomial coefficients are Real, not converted chip log-ROMs.
-// Coefficients are arranged by field, ready for a future gather/SIMD backend.
+// Keep one segment's four coefficients together to fetch a single cache line.
+// Voice state remains SoA; a SIMD backend can gather these segment records.
 template<class Real> class wave_table : public numeric_type<Real> {
 public:
     static constexpr unsigned bits = 12;
@@ -91,9 +111,9 @@ public:
     {
         unsigned index = unsigned(phase >> (64 - bits));
         constexpr uint64_t mask = (uint64_t(1) << (64 - bits)) - 1;
-        Real t = std::ldexp(Real(phase & mask), -(64 - int(bits)));
-        return ((m_c[3][wave][index] * t + m_c[2][wave][index]) * t
-                + m_c[1][wave][index]) * t + m_c[0][wave][index];
+        Real t = Real(phase & mask) * Real(1.0 / 4503599627370496.0);
+        return ((m_c[wave][index][3] * t + m_c[wave][index][2]) * t
+                + m_c[wave][index][1]) * t + m_c[wave][index][0];
     }
 private:
     wave_table()
@@ -122,13 +142,47 @@ private:
                 };
                 long double a, da, b, db;
                 point(i, a, da); point(i + 1, b, db);
-                m_c[0][w][i] = Real(a);
-                m_c[1][w][i] = Real(da);
-                m_c[2][w][i] = Real(3 * (b - a) - 2 * da - db);
-                m_c[3][w][i] = Real(2 * (a - b) + da + db);
+                m_c[w][i][0] = Real(a);
+                m_c[w][i][1] = Real(da);
+                m_c[w][i][2] = Real(3 * (b - a) - 2 * da - db);
+                m_c[w][i][3] = Real(2 * (a - b) + da + db);
             }
     }
-    Real m_c[4][8][size];
+    Real m_c[8][size][4];
+};
+
+// Bounded base-2 exponential for the audio kernel: -64 <= x <= 16.
+// A 1/64-octave table plus a local Taylor polynomial; no libm or division.
+// Fractional input is retained (including in double mode), not quantized to
+// the table index. The table is constructed before rendering begins.
+template<class Real> class exponential_table : public numeric_type<Real> {
+public:
+    static const exponential_table& instance()
+    {
+        static const exponential_table table;
+        return table;
+    }
+    Real lookup(Real x) const
+    {
+        int index = int(x * Real(64));
+        Real r = x - Real(index) * Real(0.015625);
+        Real p;
+        if (std::is_same<Real, float>::value)
+            p = Real(1) + r * (Real(0.6931471805599453094) + r *
+                (Real(0.2402265069591007123) + r * Real(0.05550410866482157995)));
+        else
+            p = Real(1) + r * (Real(0.6931471805599453094) + r *
+                (Real(0.2402265069591007123) + r * (Real(0.05550410866482157995) + r *
+                (Real(0.00961812910762847716) + r * Real(0.00133335581464284434)))));
+        return m_value[unsigned(index + 4096)] * p;
+    }
+private:
+    exponential_table()
+    {
+        for (int i = -4096; i <= 1024; ++i)
+            m_value[unsigned(i + 4096)] = Real(std::exp2(static_cast<long double>(i) / 64));
+    }
+    std::array<Real, 5121> m_value;
 };
 
 // Mean rates of the original OPM/OPZ EG step patterns. Integer patterns are
@@ -220,6 +274,55 @@ template<class Real> struct legacy : numeric_type<Real> {
     { return Real(x == 15 ? 31 : x) * Real(127) / Real(31); }
 };
 
+// Jump a sleeping LFO's xorshift generator without replaying audio samples.
+// Powers of its linear GF(2) transition are initialized on the control path.
+class random_jump_table {
+public:
+    static uint32_t next(uint32_t& state)
+    { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return state; }
+    static const random_jump_table& instance()
+    { static const random_jump_table table; return table; }
+    uint32_t advance(uint32_t state, uint64_t count) const
+    {
+        unsigned bit = 0;
+        while (count) {
+            if (count & 1) state = apply(m_power[bit], state);
+            count >>= 1; ++bit;
+        }
+        return state;
+    }
+private:
+    using matrix = std::array<uint32_t, 32>;
+    static uint32_t apply(const matrix& m, uint32_t state)
+    {
+        uint32_t result = 0;
+        for (unsigned bit = 0; state; ++bit, state >>= 1)
+            if (state & 1) result ^= m[bit];
+        return result;
+    }
+    random_jump_table()
+    {
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            uint32_t basis = uint32_t(1) << bit;
+            m_power[0][bit] = next(basis);
+        }
+        for (unsigned power = 1; power < 64; ++power)
+            for (unsigned bit = 0; bit < 32; ++bit)
+                m_power[power][bit] = apply(m_power[power-1], m_power[power-1][bit]);
+    }
+    std::array<matrix, 64> m_power;
+};
+
+inline uint64_t multiply_high(uint64_t a, uint64_t b)
+{
+    uint64_t al = uint32_t(a), bl = uint32_t(b), ah = a >> 32, bh = b >> 32;
+    uint64_t low = al * bl;
+    uint64_t mid = ah * bl + (low >> 32);
+    uint64_t carry = mid >> 32;
+    mid = al * bh + uint32_t(mid);
+    return ah * bh + carry + (mid >> 32);
+}
+
 // All hot fields are structure-of-arrays with the voice index contiguous.
 // Scalar kernels are operator-major / voice-minor. No virtual dispatch,
 // per-voice allocation or locks. Future SIMD may use unaligned loads, or an
@@ -237,18 +340,18 @@ template<class Real, std::size_t Voices = 8> class fm_engine : public numeric_ty
         lanes<bool> am{}, pitch_modulated{};
     };
     struct lfo_bank {
-        lanes<uint64_t> phase{}, step{};
+        lanes<uint64_t> phase{}, step{}, time{};
         lanes<Real> pitch{}, amplitude{}, held{};
         lanes<uint32_t> random{};
         lanes<lfo_wave> waveform{};
-        lanes<bool> sync{};
+        lanes<bool> sync{}, enabled{};
     };
 public:
     using real_type = Real;
     using parameters = voice_parameters<Real>;
     static constexpr std::size_t voice_count = Voices;
 
-    explicit fm_engine(model chip = model::opm) : m_model(chip), m_wave(wave_table<Real>::instance())
+    explicit fm_engine(model chip = model::opm) : m_model(chip), m_wave(wave_table<Real>::instance()), m_exp(exponential_table<Real>::instance()), m_random_jump(random_jump_table::instance())
     {
         prepare(Real(48000)); // initialize tables/cache before entering the audio callback
     }
@@ -257,6 +360,7 @@ public:
         if (!range(sample_rate, Real(8000), Real(768000)) ||
             !range(reference_clock, Real(100000), Real(100000000))) return false;
         m_rate = sample_rate; m_reference_clock = reference_clock;
+        m_inverse_rate = 1.0 / static_cast<double>(sample_rate);
         m_eg_ticks = reference_clock / Real(64 * 3) / sample_rate;
         reset();
         for (std::size_t v = 0; v < Voices; ++v) cache(v);
@@ -264,12 +368,13 @@ public:
     }
     void reset()
     {
+        m_time = 0; m_awake_count = 0; m_awake.fill(false); m_retire = false;
         for (auto& op : m_op) {
             op.phase.fill(0); op.attenuation.fill(Real(1023)); op.error.fill(Real(0));
             op.output.fill(Real(0)); op.state.fill(stage::off);
         }
         for (auto& lfo : m_lfo) {
-            lfo.phase.fill(0); lfo.held.fill(Real(0));
+            lfo.phase.fill(0); lfo.time.fill(0); lfo.held.fill(Real(0));
             for (std::size_t v = 0; v < Voices; ++v) lfo.random[v] = uint32_t(v + 1);
         }
         m_feedback0.fill(Real(0)); m_feedback1.fill(Real(0));
@@ -279,6 +384,7 @@ public:
     bool set_voice(std::size_t voice, const parameters& p)
     {
         if (voice >= Voices || !valid(p)) return false;
+        sync_lfos(voice);
         m_parameters[voice] = p;
         cache(voice);
         return true;
@@ -289,6 +395,8 @@ public:
     {
         if (v >= Voices || mask > 15) return false;
         if (mask == 0) return true;
+        sync_lfos(v);
+        if (!m_awake[v]) { m_awake[v] = true; ++m_awake_count; }
         if (mask & 1) m_feedback0[v] = m_feedback1[v] = Real(0);
         for (unsigned o = 0; o < 4; ++o) if (mask & (1u << o)) {
             auto& op = m_op[o];
@@ -321,11 +429,38 @@ public:
     bool render(Real* left, Real* right, std::size_t frames)
     {
         if (frames && (!left || !right || left == right)) return false;
+        if (!frames) return true;
+        if (!m_awake_count) {
+            std::fill_n(left, frames, Real(0)); std::fill_n(right, frames, Real(0));
+            m_time += frames;
+            return true;
+        }
+        // Build sparse work lists once per block; no unused-slot work per sample.
+        m_live_count = m_noise_count = 0;
+        m_lfo_count.fill(0);
+        for (std::size_t v = 0; v < Voices; ++v) {
+            if (!m_awake[v]) continue;
+            if (m_noise[v]) m_noise_live[m_noise_count++] = v;
+            m_live[m_live_count++] = v;
+            m_pm[v] = m_am[v] = Real(0); m_pitch_factor[v] = Real(1);
+            for (unsigned i = 0; i < 2; ++i) if (m_lfo[i].enabled[v]) {
+                sync_lfo(m_lfo[i], v);
+                m_lfo_live[i][m_lfo_count[i]++] = v;
+            }
+        }
+        if (!m_live_count && !m_noise_count) {
+            std::fill_n(left, frames, Real(0)); std::fill_n(right, frames, Real(0));
+            m_time += frames;
+            return true;
+        }
         for (std::size_t s = 0; s < frames; ++s) {
-            modulation();
-            for (unsigned o = 0; o < 4; ++o) operator_kernel(o);
+            if (m_lfo_count[0] || m_lfo_count[1]) modulation();
+            if (m_noise_count) noise_kernel();
+            operator_kernel<0>(); operator_kernel<1>();
+            operator_kernel<2>(); operator_kernel<3>();
             Real l = Real(0), r = Real(0);
-            for (std::size_t v = 0; v < Voices; ++v) {
+            for (std::size_t n = 0; n < m_live_count; ++n) {
+                std::size_t v = m_live[n];
                 Real sum = m_op[3].output[v];
                 for (unsigned o = 0; o < 3; ++o)
                     if (m_carriers[v] & (1u << o)) sum += m_op[o].output[v];
@@ -334,7 +469,19 @@ public:
                 l += sum * m_left[v]; r += sum * m_right[v];
             }
             left[s] = l; right[s] = r;
+            if (m_retire) {
+                retire_finished(m_time + s + 1);
+                if (!m_live_count) {
+                    std::fill_n(left + s + 1, frames - s - 1, Real(0));
+                    std::fill_n(right + s + 1, frames - s - 1, Real(0));
+                    break;
+                }
+            }
         }
+        m_time += frames;
+        for (unsigned i = 0; i < 2; ++i)
+            for (std::size_t n = 0; n < m_lfo_count[i]; ++n)
+                m_lfo[i].time[m_lfo_live[i][n]] = m_time;
         return true;
     }
     // Read-only diagnostic access; useful for numerical validation.
@@ -391,7 +538,7 @@ private:
         Real fb = p.feedback * Real(7) / Real(127);
         m_feedback_scale[v] = fb < Real(1) ? fb / Real(64) : std::exp2(fb) / Real(128);
         m_noise[v] = p.noise;
-        // As on OPM/OPZ, clock the LFSR continuously and sample its state
+        // While the voice is awake, clock the LFSR and sample its state
         // at the requested noise rate. Changing the latch rate must not
         // change the polynomial's clock. Above the reference clock's range,
         // the extended API raises the generator rate to the requested rate.
@@ -424,18 +571,39 @@ private:
             b.step[v] = phase_step(a.frequency, m_rate);
             b.pitch[v] = a.pitch_cents; b.amplitude[v] = a.amplitude;
             b.waveform[v] = a.waveform; b.sync[v] = a.key_sync;
+            b.enabled[v] = a.pitch_cents != Real(0) || a.amplitude != Real(0);
         }
     }
     static uint32_t random_next(uint32_t& state)
-    { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return state; }
+    { return random_jump_table::next(state); }
+    void sync_lfo(lfo_bank& b, std::size_t v)
+    {
+        uint64_t elapsed = m_time - b.time[v];
+        if (!elapsed) return;
+        uint64_t delta = b.step[v] * elapsed, previous = b.phase[v];
+        b.phase[v] += delta;
+        uint64_t wraps = multiply_high(b.step[v], elapsed) + uint64_t(b.phase[v] < previous);
+        if (wraps) {
+            b.random[v] = m_random_jump.advance(b.random[v], wraps);
+            b.held[v] = Real(b.random[v]) * Real(1.0 / 2147483648.0) - Real(1);
+        }
+        b.time[v] = m_time;
+    }
+    void sync_lfos(std::size_t v)
+    { for (auto& b : m_lfo) sync_lfo(b, v); }
     void modulation()
     {
-        m_pm.fill(Real(0)); m_am.fill(Real(0));
-        for (auto& b : m_lfo) for (std::size_t v = 0; v < Voices; ++v) {
+        for (std::size_t n = 0; n < m_live_count; ++n) {
+            std::size_t v = m_live[n]; m_pm[v] = m_am[v] = Real(0);
+        }
+        for (unsigned i = 0; i < 2; ++i) {
+          auto& b = m_lfo[i];
+          for (std::size_t n = 0; n < m_lfo_count[i]; ++n) {
+            std::size_t v = m_lfo_live[i][n];
             uint64_t before = b.phase[v]; b.phase[v] += b.step[v];
             if (b.phase[v] < before)
-                b.held[v] = Real(random_next(b.random[v])) / Real(2147483648.0) - Real(1);
-            Real p = std::ldexp(Real(b.phase[v] >> 11), -53);
+                b.held[v] = Real(random_next(b.random[v])) * Real(1.0 / 2147483648.0) - Real(1);
+            Real p = Real(b.phase[v] >> 11) * Real(1.0 / 9007199254740992.0);
             Real pm = Real(0), am = Real(0);
             switch (b.waveform[v]) {
                 case lfo_wave::saw:
@@ -448,12 +616,21 @@ private:
                     pm = p < Real(0.25) ? Real(4)*p :
                          (p < Real(0.75) ? Real(2)-Real(4)*p : Real(4)*p-Real(4));
                     am = std::abs(Real(2)*p-Real(1)); break;
-                case lfo_wave::noise: pm = b.held[v]; am = (pm+Real(1))/Real(2); break;
-                case lfo_wave::sine: pm = m_wave.lookup(0, b.phase[v]); am = (pm+Real(1))/Real(2); break;
+                case lfo_wave::noise: pm = b.held[v]; am = (pm+Real(1))*Real(0.5); break;
+                case lfo_wave::sine: pm = m_wave.lookup(0, b.phase[v]); am = (pm+Real(1))*Real(0.5); break;
             }
             m_pm[v] += pm * b.pitch[v]; m_am[v] += am * b.amplitude[v];
         }
-        for (std::size_t v = 0; v < Voices; ++v) if (m_noise[v]) {
+        }
+        for (std::size_t n = 0; n < m_live_count; ++n) {
+            std::size_t v = m_live[n];
+            m_pitch_factor[v] = m_pm[v] == Real(0) ? Real(1) : m_exp.lookup(m_pm[v] * Real(1.0 / 1200.0));
+        }
+    }
+    void noise_kernel()
+    {
+        for (std::size_t n = 0; n < m_noise_count; ++n) {
+            std::size_t v = m_noise_live[n];
             uint64_t before = m_noise_phase[v]; m_noise_phase[v] += m_noise_step[v];
             unsigned ticks = m_noise_whole[v] + unsigned(m_noise_phase[v] < before);
             while (ticks--) {
@@ -467,10 +644,37 @@ private:
             }
         }
     }
-    void operator_kernel(unsigned o)
+    void retire_finished(uint64_t now)
+    {
+        m_retire = false;
+        std::size_t count = 0;
+        for (std::size_t n = 0; n < m_live_count; ++n) {
+            std::size_t v = m_live[n];
+            if (active(v)) m_live[count++] = v;
+            else {
+                m_awake[v] = false; --m_awake_count;
+                for (auto& lfo : m_lfo) if (lfo.enabled[v]) lfo.time[v] = now;
+            }
+        }
+        m_live_count = count;
+        for (unsigned i = 0; i < 2; ++i) {
+            count = 0;
+            for (std::size_t n = 0; n < m_lfo_count[i]; ++n) {
+                std::size_t v = m_lfo_live[i][n];
+                if (m_awake[v]) m_lfo_live[i][count++] = v;
+            }
+            m_lfo_count[i] = count;
+        }
+        count = 0;
+        for (std::size_t n = 0; n < m_noise_count; ++n)
+            if (m_awake[m_noise_live[n]]) m_noise_live[count++] = m_noise_live[n];
+        m_noise_count = count;
+    }
+    template<unsigned o> void operator_kernel()
     {
         auto& b = m_op[o];
-        for (std::size_t v = 0; v < Voices; ++v) {
+        for (std::size_t n = 0; n < m_live_count; ++n) {
+            std::size_t v = m_live[n];
             Real& e = b.attenuation[v]; stage& st = b.state[v];
             // Carry sub-ULP increments rather than letting slow float32 EGs stall.
             auto add_envelope = [&](Real increment) {
@@ -501,16 +705,16 @@ private:
                 e = Real(1023);
                 // Zero-rate attack may remain silent indefinitely; do not
                 // retire it, as a later rate edit can start the attack.
-                if (st != stage::attack) st = stage::off;
+                if (st != stage::attack) { st = stage::off; m_retire = true; }
             }
             uint64_t step = b.step[v];
             if (b.pitch_modulated[v] && m_pm[v] != Real(0))
-                step = phase_step(b.frequency[v] * std::exp2(m_pm[v] / Real(1200)), m_rate);
+                step = positive_phase_offset(static_cast<double>(b.frequency[v] * m_pitch_factor[v]) * m_inverse_rate);
             b.phase[v] += step;
             Real attenuation = e * b.shift[v] + b.level[v] + (b.am[v] ? m_am[v] : Real(0));
             if (st == stage::off || e >= Real(1023)) { b.output[v] = Real(0); continue; }
             if (o == 3 && m_noise[v]) {
-                b.output[v] = m_noise_value[v] * std::max(Real(0), Real(1023) - attenuation) / Real(4096);
+                b.output[v] = m_noise_value[v] * std::max(Real(0), Real(1023) - attenuation) * Real(0.000244140625);
                 continue;
             }
             Real offset = Real(0);
@@ -518,12 +722,23 @@ private:
             else for (unsigned j = 0; j < o; ++j)
                 if (m_routes[o - 1][v] & (1u << j)) offset += m_op[j].output[v] * Real(4);
             // Modulation changes lookup phase, never the oscillator accumulator.
-            uint64_t lookup = b.phase[v] + phase_offset(offset);
-            b.output[v] = m_wave.lookup(b.waveform[v], lookup) * std::exp2(-attenuation / Real(64));
+            uint64_t lookup = b.phase[v] + bounded_phase_offset(offset);
+            b.output[v] = m_wave.lookup(b.waveform[v], lookup) * m_exp.lookup(-attenuation * Real(0.015625));
         }
     }
     model m_model;
     const wave_table<Real>& m_wave;
+    const exponential_table<Real>& m_exp;
+    const random_jump_table& m_random_jump;
+    uint64_t m_time = 0;
+    lanes<bool> m_awake{};
+    std::size_t m_awake_count = 0;
+    bool m_retire = false;
+    std::size_t m_live_count = 0, m_noise_count = 0;
+    lanes<std::size_t> m_live{}, m_noise_live{};
+    std::array<lanes<std::size_t>, 2> m_lfo_live{};
+    std::array<std::size_t, 2> m_lfo_count{};
+    double m_inverse_rate = 1.0 / 48000.0;
     envelope_rates<Real> m_rates;
     Real m_rate = Real(48000), m_reference_clock = Real(3579545), m_eg_ticks = Real(0);
     std::array<parameters, Voices> m_parameters{}; // cold control data
@@ -531,7 +746,7 @@ private:
     std::array<lfo_bank, 2> m_lfo{};
     std::array<lanes<unsigned>, 3> m_routes{};
     lanes<unsigned> m_carriers{};
-    lanes<Real> m_left{}, m_right{}, m_feedback0{}, m_feedback1{}, m_feedback_scale{}, m_pm{}, m_am{};
+    lanes<Real> m_left{}, m_right{}, m_feedback0{}, m_feedback1{}, m_feedback_scale{}, m_pm{}, m_am{}, m_pitch_factor{};
     lanes<uint64_t> m_noise_phase{}, m_noise_step{}, m_noise_latch_phase{}, m_noise_latch_step{};
     lanes<uint32_t> m_noise_rng{}, m_noise_whole{};
     lanes<Real> m_noise_value{};
