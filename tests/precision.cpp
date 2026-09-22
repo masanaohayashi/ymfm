@@ -426,6 +426,41 @@ template<class R> void singleton_transition()
     }
 }
 
+template<class R> void held_envelope_edits()
+{
+    for (model chip : {model::opm,model::opz}) {
+        fm_engine<R,128> engine(chip);
+        voice_parameters<R> patch;
+        patch.frequency=R(375);patch.algorithm=7;
+        patch.operators[3].attack=R(127);
+        patch.operators[3].release=R(127);
+        CHECK(engine.set_voice(127,patch));CHECK(engine.key_on(127,8));
+        R left[256],right[256];
+        CHECK(engine.render(left,right,256));
+        CHECK(engine.attenuation(127,3)==R(0));CHECK(engine.active(127));
+        patch.operators[3].sustain_rate=R(40.5);
+        CHECK(engine.set_voice(127,patch));CHECK(engine.render(left,right,256));
+        CHECK(engine.attenuation(127,3)>R(0));
+        patch.operators[3].sustain_rate=R(0);
+        CHECK(engine.set_voice(127,patch));CHECK(engine.render(left,right,256));
+        R held=engine.attenuation(127,3);
+        CHECK(engine.render(left,right,256));CHECK(engine.attenuation(127,3)==held);
+        // Tone edits must remain effective while the EG itself is stationary.
+        patch.operators[3].total_level=R(12.5);
+        patch.operators[3].envelope_shift=R(1.5);
+        patch.lfos[0].amplitude=R(30);patch.lfos[0].frequency=R(11);
+        patch.operators[3].am_enabled=true;
+        CHECK(engine.set_voice(127,patch));CHECK(engine.render(left,right,256));
+        CHECK(engine.attenuation(127,3)==held);
+        CHECK(engine.key_off(127,8));CHECK(engine.render(left,right,256));
+        CHECK(engine.attenuation(127,3)>held);
+        for(unsigned n=0;n<32;++n)CHECK(engine.render(left,right,256));
+        CHECK(!engine.active(127));
+        CHECK(engine.key_on(127,8));CHECK(engine.render(left,right,256));
+        CHECK(engine.active(127));CHECK(engine.attenuation(127,3)==R(0));
+    }
+}
+
 int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
@@ -439,6 +474,7 @@ int main()
     double_is_double();imports();
     exponential_accuracy<float>();exponential_accuracy<double>();
     singleton_transition<float>();singleton_transition<double>();
+    held_envelope_edits<float>();held_envelope_edits<double>();
     sleeping_random();sleeping_voices<float>();sleeping_voices<double>();
     std::printf("%u failures\n",failures);
     return failures?1:0;

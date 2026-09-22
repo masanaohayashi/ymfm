@@ -43,6 +43,6 @@ with tempfile.TemporaryDirectory(prefix='ymfm-perf-') as temporary:
         threshold=args.min_speedup if args.min_speedup is not None else (5.0 if case.endswith(('idle','released')) else 2.0)
         ok=ratio>=threshold
         print(f'{case:14} {before:.6f}s -> {after:.6f}s  {ratio:.2f}x  '
-              f'{"PASS" if ok else "FAIL"} (>= {threshold:.1f}x)',flush=True)
+              f'{"PASS" if ok else "FAIL"} (>= {threshold:.2f}x)',flush=True)
         failed|=not ok
     sys.exit(1 if failed else 0)

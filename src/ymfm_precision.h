@@ -44,7 +44,7 @@
 namespace ymfm { namespace precision {
 
 enum class model { opm, opz };
-enum class stage : uint8_t { off, attack, decay, sustain, release, reverb };
+enum class stage : uint8_t { off, attack, decay, sustain, release, reverb, sustain_hold };
 enum class lfo_wave : uint8_t { saw, square, triangle, noise, sine };
 
 template<class Real> struct numeric_type {
@@ -568,6 +568,8 @@ private:
             b.attack_delta[v] = std::expm1(m_rates.at(m_rates.attack, attack_rate(a)) * m_eg_ticks);
             b.decay_step[v] = m_rates.at(m_rates.decay, effective(a.decay * Real(62) / Real(127), a.rate_scaling)) * m_eg_ticks;
             b.sustain_step[v] = m_rates.at(m_rates.decay, effective(a.sustain_rate * Real(62) / Real(127), a.rate_scaling)) * m_eg_ticks;
+            if (b.state[v] == stage::sustain_hold && b.sustain_step[v] != Real(0))
+                b.state[v] = stage::sustain;
             b.release_step[v] = m_rates.at(m_rates.decay, effective(Real(2) + a.release * Real(60) / Real(127), a.rate_scaling)) * m_eg_ticks;
             b.reverb_step[v] = a.reverb == Real(0) ? b.release_step[v] :
                 std::min(b.release_step[v], m_rates.at(m_rates.decay,
@@ -701,7 +703,13 @@ private:
                     add_envelope(b.decay_step[v]);
                     if (e >= b.sustain_level[v]) st = stage::sustain;
                     break;
-                case stage::sustain: add_envelope(b.sustain_step[v]); break;
+                case stage::sustain:
+                    add_envelope(b.sustain_step[v]);
+                    // Only freeze after the compensated sum has settled. A
+                    // nonzero residual must still be applied on later samples.
+                    if (b.sustain_step[v] == Real(0) && b.error[v] == Real(0)) st = stage::sustain_hold;
+                    break;
+                case stage::sustain_hold: break;
                 case stage::release:
                     add_envelope(b.release_step[v]);
                     if (m_model == model::opz && e >= Real(192)) st = stage::reverb;
