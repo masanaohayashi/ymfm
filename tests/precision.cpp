@@ -622,6 +622,56 @@ template<class R> void dynamic_packets()
     }
 }
 
+template<class R> void decay_kernel_transitions()
+{
+    for(model chip:{model::opm,model::opz})for(bool lfo:{false,true}) {
+        fm_engine<R,16> candidate(chip),reference(chip);
+        voice_parameters<R> silent;silent.gain_left=silent.gain_right=R(0);
+        for(auto& op:silent.operators)op.attack=R(0);
+        CHECK(reference.set_voice(0,silent));CHECK(reference.key_on(0));
+        std::array<voice_parameters<R>,8> patches;
+        for(unsigned n=0;n<8;++n){
+            auto& p=patches[n];p.algorithm=n;p.frequency=R(123+n*19);p.feedback=R(71);
+            p.gain_left=p.gain_right=R(0.03);
+            if(lfo){p.lfos[0].pitch_cents=R(17);p.lfos[0].amplitude=R(13);}
+            for(unsigned o=0;o<4;++o){auto& op=p.operators[o];
+                op.attack=R(127);op.decay=R(100);op.sustain_level=R(0.25+n*0.1+o*0.05);
+                op.sustain_rate=R(23);op.release=R(127);op.reverb=R(0);
+                op.am_enabled=true;op.waveform=chip==model::opz?(n+o)%8:0;
+            }
+            CHECK(candidate.set_voice(n+4,p));CHECK(reference.set_voice(n+4,p));
+            CHECK(candidate.key_on(n+4));CHECK(reference.key_on(n+4));
+        }
+        std::array<R,8192>a,b,c,d;
+        auto compare=[&](unsigned frames){
+            CHECK(candidate.render(a.data(),b.data(),frames));CHECK(reference.render(c.data(),d.data(),frames));
+            CHECK(std::equal(a.begin(),a.begin()+frames,c.begin()));
+            CHECK(std::equal(b.begin(),b.begin()+frames,d.begin()));
+            for(unsigned v=4;v<12;++v)for(unsigned o=0;o<4;++o){
+                CHECK(candidate.phase(v,o)==reference.phase(v,o));
+                CHECK(candidate.attenuation(v,o)==reference.attenuation(v,o));
+            }
+        };
+        compare(1);compare(32);compare(1024);
+        for(unsigned n=0;n<8;++n)for(unsigned o=0;o<4;++o)
+            CHECK(candidate.attenuation(n+4,o)>=patches[n].operators[o].sustain_level*R(992)/R(127));
+        // Re-enter decay, edit a level below the current attenuation, then
+        // release one voice so both kernel eligibility and live slots change.
+        for(unsigned n=0;n<8;++n){
+            for(auto& op:patches[n].operators){op.decay=R(50);op.sustain_level=R(64);}
+            CHECK(candidate.set_voice(n+4,patches[n]));CHECK(reference.set_voice(n+4,patches[n]));
+            CHECK(candidate.key_on(n+4));CHECK(reference.key_on(n+4));
+        }
+        compare(257);
+        patches[0].operators[0].sustain_level=R(0);
+        CHECK(candidate.set_voice(4,patches[0]));CHECK(reference.set_voice(4,patches[0]));
+        CHECK(candidate.key_off(5));CHECK(reference.key_off(5));compare(8192);
+        for(unsigned v=4;v<12;++v){CHECK(candidate.key_off(v));CHECK(reference.key_off(v));}
+        compare(8192);
+        for(unsigned v=4;v<12;++v)CHECK(!candidate.active(v));
+    }
+}
+
 int main()
 {
     wave_accuracy<float>();wave_accuracy<double>();
@@ -640,6 +690,7 @@ int main()
     held_envelope_edits<float>();held_envelope_edits<double>();
     steady_packets<float>();steady_packets<double>();
     dynamic_packets<float>();dynamic_packets<double>();
+    decay_kernel_transitions<float>();decay_kernel_transitions<double>();
     sleeping_random();sleeping_voices<float>();sleeping_voices<double>();
     std::printf("%u failures\n",failures);
     return failures?1:0;

@@ -532,6 +532,15 @@ public:
             m_time += frames;
             return true;
         }
+        // Specialize only when every live lane starts below its sustain
+        // threshold in decay. The first transition invalidates the next sample.
+        for (unsigned o = 0; o < 4; ++o) {
+            m_decay_ready[o] = m_live_count > 1;
+            for (std::size_t n = 0; n < m_live_count && m_decay_ready[o]; ++n) {
+                std::size_t v = m_live[n];
+                m_decay_ready[o] = m_op[o].state[v] == stage::decay && m_op[o].attenuation[v] < m_op[o].sustain_level[v];
+            }
+        }
         prepare_steady_kernels();
         if (m_steady_ready[0] || m_steady_ready[1] || m_steady_ready[2] || m_steady_ready[3])
             render_dispatch<true>(left, right, frames);
@@ -840,7 +849,7 @@ private:
             b.output[v] = m_wave.lookup(b.waveform[v], steady_phase<o, Pitch>(v)) * gain;
         }
     }
-    template<unsigned o, bool Single, bool Steady, bool Modulated> void operator_kernel()
+    template<unsigned o, bool Single, bool Steady, bool Modulated, bool Decay = false> void operator_kernel()
     {
         if (Steady && !Single && m_steady_ready[o]) {
             if (m_steady_pitch[o]) {
@@ -850,6 +859,10 @@ private:
                 if (m_steady_am[o]) steady_kernel<o, false, true>();
                 else steady_kernel<o, false, false>();
             }
+            return;
+        }
+        if (!Decay && !Single && m_decay_ready[o]) {
+            operator_kernel<o, Single, false, Modulated, true>();
             return;
         }
         auto& b = m_op[o];
@@ -863,8 +876,8 @@ private:
                 b.error[v] = (next - e) - corrected;
                 e = next;
             };
-            if (st == stage::decay && e >= b.sustain_level[v]) st = stage::sustain;
-            switch (st) {
+            if (!Decay && st == stage::decay && e >= b.sustain_level[v]) st = stage::sustain;
+            switch (Decay ? stage::decay : st) {
                 case stage::off: b.output[v] = Real(0); continue;
                 case stage::attack:
                     add_envelope((e + Real(1)) * b.attack_delta[v]);
@@ -872,7 +885,10 @@ private:
                     break;
                 case stage::decay:
                     add_envelope(b.decay_step[v]);
-                    if (e >= b.sustain_level[v]) st = stage::sustain;
+                    if (e >= b.sustain_level[v]) {
+                        st = stage::sustain;
+                        if (Decay) m_decay_ready[o] = false;
+                    }
                     break;
                 case stage::sustain:
                     add_envelope(b.sustain_step[v]);
@@ -891,7 +907,10 @@ private:
                 e = Real(1023);
                 // Zero-rate attack may remain silent indefinitely; do not
                 // retire it, as a later rate edit can start the attack.
-                if (st != stage::attack) { st = stage::off; m_retire = true; }
+                if (st != stage::attack) {
+                    st = stage::off; m_retire = true;
+                    if (Decay) m_decay_ready[o] = false;
+                }
             }
             uint64_t step = b.step[v];
             if (Modulated && b.pitch_modulated[v] && m_pm[v] != Real(0))
@@ -912,6 +931,7 @@ private:
             b.output[v] = m_wave.lookup(b.waveform[v], lookup) * m_exp.lookup(-attenuation * Real(0.015625));
         }
     }
+    std::array<bool, 4> m_decay_ready{};
     std::array<bool, 4> m_steady_ready{}, m_steady_pitch{}, m_steady_am{};
     std::array<lanes<Real>, 4> m_steady_gain{}, m_steady_attenuation{};
     std::size_t m_steady_first = 0;
