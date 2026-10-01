@@ -45,6 +45,8 @@
 namespace ymfm { namespace precision {
 
 enum class model { opm, opz };
+// Per-engine policy; changing it retains notes, phases and feedback.
+enum class render_mode : uint8_t { faithful, fast };
 enum class stage : uint8_t { off, attack, decay, sustain, release, reverb, sustain_hold };
 enum class lfo_wave : uint8_t { saw, square, triangle, noise, sine };
 
@@ -95,13 +97,22 @@ template<class Real> inline uint64_t phase_step(Real hz, Real sample_rate)
     return phase_offset(static_cast<double>(hz) * (1.0 / static_cast<double>(sample_rate)));
 }
 
-// Native 128-bit packets on AArch64/Clang; keep a scalar build for cross-checking.
+// Native 128-bit packets on AArch64/SSE2 with Clang; keep a scalar build for cross-checking.
 // This does not change the precision of any lane.
 template<class Real> struct simd_packet;
-#if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
+#if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
 template<> struct simd_packet<float> {
     using type = float __attribute__((vector_size(16)));
     static type load(const float* p) { type v; std::memcpy(&v,p,sizeof(v)); return v; }
+    static void gather_pair(const float* const* c, type& base, type& delta) {
+        using half = float __attribute__((vector_size(8)));
+        half a,b,d,e;
+        std::memcpy(&a,c[0],8);std::memcpy(&b,c[1],8);
+        std::memcpy(&d,c[2],8);std::memcpy(&e,c[3],8);
+        type ab=__builtin_shufflevector(a,b,0,2,1,3),de=__builtin_shufflevector(d,e,0,2,1,3);
+        base=__builtin_shufflevector(ab,de,0,1,4,5);
+        delta=__builtin_shufflevector(ab,de,2,3,6,7);
+    }
     static void gather(const float* const* c, type& c0, type& c1, type& c2, type& c3) {
         type a=load(c[0]), b=load(c[1]), d=load(c[2]), e=load(c[3]);
         type ab0=__builtin_shufflevector(a,b,0,4,1,5);
@@ -117,6 +128,10 @@ template<> struct simd_packet<float> {
 template<> struct simd_packet<double> {
     using type = double __attribute__((vector_size(16)));
     static type load(const double* p) { type v; std::memcpy(&v,p,sizeof(v)); return v; }
+    static void gather_pair(const double* const* c, type& base, type& delta) {
+        type a=load(c[0]),b=load(c[1]);
+        base=__builtin_shufflevector(a,b,0,2);delta=__builtin_shufflevector(a,b,1,3);
+    }
     static void gather(const double* const* c, type& c0, type& c1, type& c2, type& c3) {
         type a=load(c[0]), b=load(c[1]), d=load(c[0]+2), e=load(c[1]+2);
         c0=__builtin_shufflevector(a,b,0,2); c1=__builtin_shufflevector(a,b,1,3);
@@ -146,11 +161,13 @@ public:
         return ((m_c[wave][index][3] * t + m_c[wave][index][2]) * t
                 + m_c[wave][index][1]) * t + m_c[wave][index][0];
     }
+    Real fast_node(unsigned wave, unsigned index) const { return m_fast[wave][index & 1023][0]; }
+    const Real* fast_pair(unsigned wave, unsigned index) const { return m_fast[wave][index & 1023]; }
     static constexpr unsigned packet_size = 16 / sizeof(Real);
     void lookup_packet(const unsigned* waves, const uint64_t* phases,
                        const Real* gains, Real* output) const
     {
-#if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
+#if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
         using vector = typename simd_packet<Real>::type;
         vector t{}, c0, c1, c2, c3, gain;
         const Real* coefficients[packet_size];
@@ -200,9 +217,13 @@ private:
                 m_c[w][i][1] = Real(da);
                 m_c[w][i][2] = Real(3 * (b - a) - 2 * da - db);
                 m_c[w][i][3] = Real(2 * (a - b) + da + db);
+                if ((i & 3) == 0) m_fast[w][i >> 2][0] = Real(a);
             }
+        for(unsigned w=0;w<8;++w)for(unsigned i=0;i<1024;++i)
+            m_fast[w][i][1]=m_fast[w][(i+1)&1023][0]-m_fast[w][i][0];
     }
     Real m_c[8][size][4];
+    Real m_fast[8][1024][2];
 };
 
 // Bounded base-2 exponential for the audio kernel: -64 <= x <= 16.
@@ -233,7 +254,7 @@ public:
     void lookup_packet(const Real* x, Real* output) const
     {
         constexpr unsigned width = wave_table<Real>::packet_size;
-#if defined(__aarch64__) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
+#if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
         using vector = typename simd_packet<Real>::type;
         vector r{}, scale{};
         for (unsigned n = 0; n < width; ++n) {
@@ -447,6 +468,7 @@ public:
     }
     void reset()
     {
+        m_fast_remaining.fill(0);
         m_time = 0; m_awake_count = 0; m_awake.fill(false); m_retire = false;
         for (auto& op : m_op) {
             op.phase.fill(0); op.attenuation.fill(Real(1023)); op.error.fill(Real(0));
@@ -463,6 +485,7 @@ public:
     bool set_voice(std::size_t voice, const parameters& p)
     {
         if (voice >= Voices || !valid(p)) return false;
+        m_fast_remaining[voice] = 0;
         sync_lfos(voice);
         m_parameters[voice] = p;
         cache(voice);
@@ -474,6 +497,7 @@ public:
     {
         if (v >= Voices || mask > 15) return false;
         if (mask == 0) return true;
+        m_fast_remaining[v] = 0;
         sync_lfos(v);
         if (!m_awake[v]) { m_awake[v] = true; ++m_awake_count; }
         if (mask & 1) m_feedback0[v] = m_feedback1[v] = Real(0);
@@ -492,6 +516,7 @@ public:
     bool key_off(std::size_t v, unsigned mask = 15)
     {
         if (v >= Voices || mask > 15) return false;
+        if (mask) m_fast_remaining[v] = 0;
         for (unsigned o = 0; o < 4; ++o)
             if ((mask & (1u << o)) && m_op[o].state[v] != stage::off)
                 m_op[o].state[v] = stage::release;
@@ -503,6 +528,8 @@ public:
         for (const auto& op : m_op) if (op.state[v] != stage::off) return true;
         return false;
     }
+    bool idle() const { return m_awake_count == 0; }
+    void advance_idle(std::size_t frames) { assert(idle()); m_time += frames; }
     // No allocation. Arrays must be non-overlapping and have frames elements.
     // Controls are applied on the render thread between calls; no hidden locks.
     bool render(Real* left, Real* right, std::size_t frames)
@@ -541,6 +568,10 @@ public:
                 m_decay_ready[o] = m_op[o].state[v] == stage::decay && m_op[o].attenuation[v] < m_op[o].sustain_level[v];
             }
         }
+        if (m_render_mode == render_mode::fast) {
+            render_fast(left, right, frames);
+            return true;
+        }
         prepare_steady_kernels();
         if (m_steady_ready[0] || m_steady_ready[1] || m_steady_ready[2] || m_steady_ready[3])
             render_dispatch<true>(left, right, frames);
@@ -552,6 +583,13 @@ public:
                 m_lfo[i].time[m_lfo_live[i][n]] = m_time;
         return true;
     }
+    void set_render_mode(render_mode mode)
+    {
+        if ((mode != render_mode::faithful && mode != render_mode::fast) || mode == m_render_mode) return;
+        m_render_mode = mode;
+        m_fast_remaining.fill(0);
+    }
+    render_mode get_render_mode() const { return m_render_mode; }
     // Read-only diagnostic access; useful for numerical validation.
     Real attenuation(std::size_t v, unsigned o) const
     { return v < Voices && o < 4 ? m_op[o].attenuation[v] : Real(0); }
@@ -862,7 +900,11 @@ private:
             return;
         }
         if (!Decay && !Single && m_decay_ready[o]) {
+#if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD) && !defined(YMFM_PRECISION_REFERENCE_RENDER)
+            decay_packet_kernel<o, Modulated>();
+#else
             operator_kernel<o, Single, false, Modulated, true>();
+#endif
             return;
         }
         auto& b = m_op[o];
@@ -931,6 +973,8 @@ private:
             b.output[v] = m_wave.lookup(b.waveform[v], lookup) * m_exp.lookup(-attenuation * Real(0.015625));
         }
     }
+    #include "ymfm_precision_block.h"
+
     std::array<bool, 4> m_decay_ready{};
     std::array<bool, 4> m_steady_ready{}, m_steady_pitch{}, m_steady_am{};
     std::array<lanes<Real>, 4> m_steady_gain{}, m_steady_attenuation{};
