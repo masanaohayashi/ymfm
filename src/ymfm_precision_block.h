@@ -58,11 +58,19 @@ void project_fast_envelope(unsigned o, std::size_t v)
             if (st == stage::sustain) st = stage::sustain_hold;
             break;
         }
-        // Bound before converting: tiny rates may need billions of samples.
+        // Find the first crossing in the bounded control interval without
+        // division or ceil in the render callback (at most six comparisons).
         Real distance = std::max(Real(0), threshold - e);
         unsigned n = remaining;
-        if (distance < step * Real(remaining))
-            n = std::max(1u, unsigned(std::ceil(distance / step)));
+        if (distance < step * Real(remaining)) {
+            unsigned low = 1, high = remaining;
+            while (low < high) {
+                unsigned mid = (low + high) / 2;
+                if (step * Real(mid) >= distance) high = mid;
+                else low = mid + 1;
+            }
+            n = low;
+        }
         e += step * Real(n); remaining -= n;
         if (e >= Real(1023)) { e = Real(1023); st = stage::off; break; }
         if (e >= threshold) st = st == stage::decay ? stage::sustain : stage::reverb;
