@@ -536,4 +536,6 @@ void ym2151::generate(output_data *output, uint32_t numsamples)
 	}
 }
 
+void ym2151::silence(uint32_t mask) { m_fm.silence(mask); }
+
 }

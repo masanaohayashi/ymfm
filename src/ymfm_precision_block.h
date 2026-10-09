@@ -245,13 +245,13 @@ void mix_block(std::size_t v, Real* left, Real* right, unsigned count)
 // SIMD across voices also parallelizes feedback (which is serial in time).
 // Time packets remain useful for a singleton; polyphonic feedback uses this
 // path so high feedback does not throw away the SIMD speed-up.
-template<unsigned o> void fast_voice_operator()
+template<unsigned o> void fast_voice_operator(std::size_t first=0)
 {
     constexpr unsigned width=wave_table<Real>::packet_size;
     auto& b=m_op[o];
-    for(std::size_t at=0;at<m_live_count;at+=width) {
+    for(std::size_t at=first;at<m_live_count;at+=width) {
         unsigned count=unsigned(std::min<std::size_t>(width,m_live_count-at));
-        uint64_t phases[width]{};Real gains[width]{},values[width]{};
+        Real values[width]{};
         unsigned waves[width]{};
 #if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
         using vector=typename simd_packet<Real>::type;
@@ -268,22 +268,28 @@ template<unsigned o> void fast_voice_operator()
         gain+=delta;
         if(o==0)offset=(input0+input1)*scale;
         else {offset=input0*Real(4);if(o>1)offset+=input1*Real(4);if(o>2)offset+=input2*Real(4);}
+        using integers=int32_t __attribute__((vector_size(width*sizeof(int32_t))));
+        using unsigneds=uint32_t __attribute__((vector_size(width*sizeof(uint32_t))));
+        vector turns=offset-__builtin_convertvector(__builtin_convertvector(offset,integers),vector);
+        integers modulation=__builtin_convertvector(turns*Real(1073741824.0),integers);
+        unsigneds high{},low{};
         for(unsigned n=0;n<count;++n) {
-            auto v=m_live[at+n];m_fast_gain[o][v]=gain[n];gains[n]=gain[n];
+            auto v=m_live[at+n];m_fast_gain[o][v]=gain[n];
             if(b.state[v]!=stage::off)b.phase[v]+=m_fast_step[o][v];
-            phases[n]=b.phase[v]+(fast_phase_offset(offset[n]));
+            high[n]=uint32_t(b.phase[v]>>32);
+            low[n]=uint32_t(b.phase[v]>>30)&3u;
             waves[n]=b.waveform[v];
         }
-        vector a{},d{},fraction{},gain_vector{};
+        // The same exact high-word phase arithmetic as the contiguous path.
+        high+=__builtin_convertvector(modulation,unsigneds)<<2;
+        unsigneds indices=high>>22;
+        unsigneds fractions=((high&0x3fffffu)<<2)|low;
+        vector fraction=__builtin_convertvector(fractions,vector)*Real(1.0/16777216.0);
+        vector a{},d{};
         const Real* pairs[width];
-        for(unsigned n=0;n<width;++n) {
-            unsigned index=unsigned(phases[n]>>54);
-            pairs[n]=m_wave.fast_pair(waves[n],index);
-            fraction[n]=Real(uint32_t(phases[n]>>30)&0xffffff)*Real(1.0/16777216.0);
-            gain_vector[n]=gains[n];
-        }
+        for(unsigned n=0;n<width;++n)pairs[n]=m_wave.fast_pair(waves[n],indices[n]);
         simd_packet<Real>::gather_pair(pairs,a,d);
-        vector result=(a+d*fraction)*gain_vector;
+        vector result=(a+d*fraction)*gain;
         std::memcpy(values,&result,sizeof(result));
 #else
         for(unsigned n=0;n<count;++n) {
@@ -309,14 +315,14 @@ template<unsigned o> void fast_voice_operator()
 }
 
 #if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
-template<unsigned o, bool Constant = false> void fast_contiguous_operator(unsigned common_routes=8)
+template<unsigned o, bool Constant = false, unsigned common_routes=8> void fast_contiguous_operator(std::size_t packet_count)
 {
     constexpr unsigned width=wave_table<Real>::packet_size;
     using vector=typename simd_packet<Real>::type;
     using integers=int32_t __attribute__((vector_size(width*sizeof(int32_t))));
     using phases2=uint64_t __attribute__((vector_size(16)));
     auto& b=m_op[o];
-    for(std::size_t v=m_live[0],end=v+m_live_count;v<end;v+=width) {
+    for(std::size_t v=m_live[0],end=v+packet_count;v<end;v+=width) {
         vector gain=simd_packet<Real>::load(&m_fast_gain[o][v]);
         if constexpr(!Constant) {
             gain+=simd_packet<Real>::load(&m_fast_dgain[o][v]);
@@ -324,7 +330,7 @@ template<unsigned o, bool Constant = false> void fast_contiguous_operator(unsign
         }
         vector offset{};
         if(o==0)offset=(simd_packet<Real>::load(&m_feedback0[v])+simd_packet<Real>::load(&m_feedback1[v]))*simd_packet<Real>::load(&m_feedback_scale[v]);
-        else if(common_routes<8) {
+        else if constexpr(common_routes<8) {
             if(common_routes&1)offset+=simd_packet<Real>::load(&m_op[0].output[v])*Real(4);
             if(o>1 && (common_routes&2))offset+=simd_packet<Real>::load(&m_op[1].output[v])*Real(4);
             if(o>2 && (common_routes&4))offset+=simd_packet<Real>::load(&m_op[2].output[v])*Real(4);
@@ -341,13 +347,21 @@ template<unsigned o, bool Constant = false> void fast_contiguous_operator(unsign
             phase+=step;std::memcpy(&b.phase[v+n],&phase,sizeof(phase));std::memcpy(phases+n,&phase,sizeof(phase));
         }
         vector a{},d{},t{};
-        const Real* pairs[width];
+        using unsigneds=uint32_t __attribute__((vector_size(width*sizeof(uint32_t))));
+        unsigneds high{},low{};
         for(unsigned n=0;n<width;++n) {
-            uint64_t lookup=phases[n]+(uint64_t(int64_t(modulation[n]))<<34);
-            unsigned index=unsigned(lookup>>54),wave=b.waveform[v+n];
-            pairs[n]=m_wave.fast_pair(wave,index);
-            t[n]=Real(uint32_t(lookup>>30)&0xffffff)*Real(1.0/16777216.0);
+            high[n]=uint32_t(phases[n]>>32);
+            low[n]=uint32_t(phases[n]>>30)&3u;
         }
+        // Modulation is a multiple of 2^34, so it cannot affect the low
+        // 32 phase bits. Unsigned lane arithmetic preserves exact wrapping.
+        high += __builtin_convertvector(modulation,unsigneds)<<2;
+        unsigneds indices=high>>22;
+        unsigneds fractions=((high&0x3fffffu)<<2)|low;
+        t=__builtin_convertvector(fractions,vector)*Real(1.0/16777216.0);
+        const Real* pairs[width];
+        for(unsigned n=0;n<width;++n)
+            pairs[n]=m_wave.fast_pair(b.waveform[v+n],indices[n]);
         simd_packet<Real>::gather_pair(pairs,a,d);
         vector result=(a+d*t)*gain;
         // Gain zero always emits canonical silence, even on a negative wave.
@@ -362,19 +376,40 @@ template<unsigned o, bool Constant = false> void fast_contiguous_operator(unsign
         }
     }
 }
+template<unsigned o, bool Constant = false>
+void dispatch_contiguous_operator(unsigned route,std::size_t packet_count)
+{
+    switch(route) {
+        case 0: fast_contiguous_operator<o,Constant,0>(packet_count);break;
+        case 1: fast_contiguous_operator<o,Constant,1>(packet_count);break;
+        case 2: fast_contiguous_operator<o,Constant,2>(packet_count);break;
+        case 3: fast_contiguous_operator<o,Constant,3>(packet_count);break;
+        case 4: fast_contiguous_operator<o,Constant,4>(packet_count);break;
+        case 5: fast_contiguous_operator<o,Constant,5>(packet_count);break;
+        case 6: fast_contiguous_operator<o,Constant,6>(packet_count);break;
+        case 7: fast_contiguous_operator<o,Constant,7>(packet_count);break;
+        default: fast_contiguous_operator<o,Constant>(packet_count);break;
+    }
+}
+
 #endif
 
 void fast_voice_samples(Real* left,Real* right,unsigned count)
 {
 #if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
     constexpr unsigned width=wave_table<Real>::packet_size;
-    const bool contiguous=m_live_count%width==0 && m_live[m_live_count-1]==m_live[0]+m_live_count-1;
+    // Keep full contiguous packets fast even with a partial last packet.
+    // Live voices are ordered; stop at the first hole without touching it.
+    std::size_t prefix=1;
+    while(prefix<m_live_count && m_live[prefix]==m_live[0]+prefix)++prefix;
+    const std::size_t packet_count=prefix-prefix%width;
+    const bool contiguous=packet_count!=0;
     bool constant=contiguous;
     unsigned common_routes[3]{8,8,8},common_carriers=8;
     if(contiguous) {
         for(unsigned o=0;o<3;++o)common_routes[o]=m_routes[o][m_live[0]];
         common_carriers=m_carriers[m_live[0]];
-        for(std::size_t v=m_live[0],end=v+m_live_count;v<end;++v) {
+        for(std::size_t v=m_live[0],end=v+packet_count;v<end;++v) {
             constant &= m_fast_constant[v];
             for(unsigned o=0;o<3;++o)if(m_routes[o][v]!=common_routes[o])common_routes[o]=8;
             if(m_carriers[v]!=common_carriers)common_carriers=8;
@@ -385,21 +420,27 @@ void fast_voice_samples(Real* left,Real* right,unsigned count)
 #if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
         if(contiguous) {
             if(constant) {
-                fast_contiguous_operator<0,true>();fast_contiguous_operator<1,true>(common_routes[0]);
-                fast_contiguous_operator<2,true>(common_routes[1]);fast_contiguous_operator<3,true>(common_routes[2]);
+                fast_contiguous_operator<0,true>(packet_count);dispatch_contiguous_operator<1,true>(common_routes[0],packet_count);
+                dispatch_contiguous_operator<2,true>(common_routes[1],packet_count);dispatch_contiguous_operator<3,true>(common_routes[2],packet_count);
             } else {
-                fast_contiguous_operator<0>();fast_contiguous_operator<1>(common_routes[0]);fast_contiguous_operator<2>(common_routes[1]);fast_contiguous_operator<3>(common_routes[2]);
+                fast_contiguous_operator<0>(packet_count);dispatch_contiguous_operator<1>(common_routes[0],packet_count);dispatch_contiguous_operator<2>(common_routes[1],packet_count);dispatch_contiguous_operator<3>(common_routes[2],packet_count);
             }
-        } else
+        }
+        const std::size_t remaining=packet_count;
+#else
+        const std::size_t remaining=0;
 #endif
-        {fast_voice_operator<0>();fast_voice_operator<1>();fast_voice_operator<2>();fast_voice_operator<3>();}
+        if(remaining<m_live_count) {
+            fast_voice_operator<0>(remaining);fast_voice_operator<1>(remaining);
+            fast_voice_operator<2>(remaining);fast_voice_operator<3>(remaining);
+        }
         Real l=Real(0),r=Real(0);
 #if (defined(__aarch64__) || defined(__SSE2__)) && defined(__clang__) && !defined(YMFM_PRECISION_DISABLE_SIMD)
         if(contiguous) {
             using vector=typename simd_packet<Real>::type;
             using mask_element=typename std::conditional<sizeof(Real)==4,int32_t,int64_t>::type;
             using masks=mask_element __attribute__((vector_size(16)));
-            for(std::size_t v=m_live[0],end=v+m_live_count;v<end;v+=width) {
+            for(std::size_t v=m_live[0],end=v+packet_count;v<end;v+=width) {
                 vector sum=simd_packet<Real>::load(&m_op[3].output[v]);
                 if(common_carriers<8) {
                     for(unsigned o=0;o<3;++o)if(common_carriers&(1u<<o))sum+=simd_packet<Real>::load(&m_op[o].output[v]);
@@ -415,9 +456,9 @@ void fast_voice_samples(Real* left,Real* right,unsigned count)
                 // floating-point rounding, after vectorizing each voice.
                 for(unsigned lane=0;lane<width;++lane){l+=vl[lane];r+=vr[lane];}
             }
-        } else
+        }
 #endif
-        for(std::size_t n=0;n<m_live_count;++n) {
+        for(std::size_t n=remaining;n<m_live_count;++n) {
             auto v=m_live[n];Real sum=m_op[3].output[v];
             for(unsigned o=0;o<3;++o)if(m_carriers[v]&(1u<<o))sum+=m_op[o].output[v];
             l+=sum*m_left[v];r+=sum*m_right[v];
@@ -454,9 +495,9 @@ void render_fast(Real* left, Real* right, std::size_t frames)
                 dispatch_fast_operator<2>(v,count);dispatch_fast_operator<3>(v,count);
                 mix_block(v,left+at,right+at,count);
             }
-            if(m_fast_constant[v])continue;
+            if(m_fast_constant[v]) {if(!active(v))m_retire=true;continue;}
             m_fast_remaining[v]-=count;
-            bool active=false;
+
             for(unsigned o=0;o<4;++o) {
                 auto& b=m_op[o];
                 // Compute from interval position, so caller block partitions
@@ -466,9 +507,9 @@ void render_fast(Real* left, Real* right, std::size_t frames)
                     b.attenuation[v]=m_fast_end_env[o][v];b.error[v]=Real(0);
                     b.state[v]=m_fast_end_stage[o][v];
                 }
-                active |= b.state[v]!=stage::off;
+
             }
-            if(!active)m_retire=true;
+            if(!active(v))m_retire=true;
         }
         at+=count;m_time+=count;
         if(m_retire)retire_finished(m_time);

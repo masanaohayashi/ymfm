@@ -807,4 +807,6 @@ void ym2414::generate(output_data *output, uint32_t numsamples)
 	}
 }
 
+void ym2414::silence(uint32_t mask) { m_fm.silence(mask); }
+
 }

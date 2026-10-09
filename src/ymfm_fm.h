@@ -369,6 +369,16 @@ public:
 	// reset the overall state
 	void reset();
 
+    // Host panic: retain registers, timers and every unselected channel.
+    void silence(uint32_t chanmask)
+    {
+        for (uint32_t ch=0; ch<CHANNELS; ++ch) if (chanmask & (1U<<ch)) {
+            m_channel[ch]->reset();
+            for (uint32_t op=0; op<4; ++op)
+                if (auto* p=m_channel[ch]->debug_operator(op)) p->reset();
+        }
+        m_modified_channels |= chanmask;
+    }
 	// master clocking function
 	uint32_t clock(uint32_t chanmask);
 

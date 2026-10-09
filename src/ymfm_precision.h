@@ -109,9 +109,9 @@ template<> struct simd_packet<float> {
         half a,b,d,e;
         std::memcpy(&a,c[0],8);std::memcpy(&b,c[1],8);
         std::memcpy(&d,c[2],8);std::memcpy(&e,c[3],8);
-        type ab=__builtin_shufflevector(a,b,0,2,1,3),de=__builtin_shufflevector(d,e,0,2,1,3);
-        base=__builtin_shufflevector(ab,de,0,1,4,5);
-        delta=__builtin_shufflevector(ab,de,2,3,6,7);
+        type ab=__builtin_shufflevector(a,b,0,1,2,3),de=__builtin_shufflevector(d,e,0,1,2,3);
+        base=__builtin_shufflevector(ab,de,0,2,4,6);
+        delta=__builtin_shufflevector(ab,de,1,3,5,7);
     }
     static void gather(const float* const* c, type& c0, type& c1, type& c2, type& c3) {
         type a=load(c[0]), b=load(c[1]), d=load(c[2]), e=load(c[3]);
@@ -482,6 +482,17 @@ public:
         m_noise_phase.fill(0); m_noise_latch_phase.fill(0); m_noise_rng.fill(1); m_noise_value.fill(Real(1));
         m_pm.fill(Real(0)); m_am.fill(Real(0));
     }
+    void silence_voice(std::size_t v)
+    {
+        if (v >= Voices) return;
+        for (auto& op : m_op) {
+            op.phase[v]=0; op.attenuation[v]=Real(1023); op.error[v]=0;
+            op.output[v]=0; op.state[v]=stage::off;
+        }
+        m_feedback0[v]=m_feedback1[v]=0;
+        m_fast_remaining[v]=0;
+        if (m_awake[v]) { m_awake[v]=false; --m_awake_count; }
+    }
     bool set_voice(std::size_t voice, const parameters& p)
     {
         if (voice >= Voices || !valid(p)) return false;
@@ -525,7 +536,9 @@ public:
     bool active(std::size_t v) const
     {
         if (v >= Voices) return false;
-        for (const auto& op : m_op) if (op.state[v] != stage::off) return true;
+        for (unsigned o=0;o<4;++o)
+            if ((m_render_mode == render_mode::faithful || o==3 || (m_carriers[v]&(1u<<o)))
+                && m_op[o].state[v] != stage::off) return true;
         return false;
     }
     bool idle() const { return m_awake_count == 0; }
@@ -761,6 +774,14 @@ private:
             std::size_t v = m_live[n];
             if (active(v)) m_live[count++] = v;
             else {
+                // Fast ends the voice when its last carrier ends. Discard
+                // inaudible modulator tails so a later mode change cannot
+                // revive a voice already retired by the selected policy.
+                if (m_render_mode == render_mode::fast)
+                    for (auto& op : m_op) {
+                        op.state[v]=stage::off;op.attenuation[v]=Real(1023);
+                        op.error[v]=Real(0);op.output[v]=Real(0);
+                    }
                 m_awake[v] = false; --m_awake_count;
                 for (auto& lfo : m_lfo) if (lfo.enabled[v]) lfo.time[v] = now;
             }

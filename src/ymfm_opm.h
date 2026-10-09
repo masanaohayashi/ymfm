@@ -268,6 +268,7 @@ public:
 	// pass-through helpers
 	uint32_t sample_rate(uint32_t input_clock) const { return m_fm.sample_rate(input_clock); }
 	void invalidate_caches() { m_fm.invalidate_caches(); }
+    void silence(uint32_t mask);
 
 	// read access
 	uint8_t read_status();
