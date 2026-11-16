@@ -159,6 +159,14 @@ public:
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
+	// return every channel's AM offset at once; same formula as
+	// lfo_am_offset, computed for all eight channels together
+	void all_lfo_am_offsets(uint32_t *out) const;
+
+	// recompute every operator's phase step for this sample; same result as
+	// compute_phase_step, for the whole chip at once
+	bool all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t *step);
+
 	// return the current noise state, gated by the noise clock
 	uint32_t noise_state() const { return m_noise_state; }
 
@@ -239,8 +247,49 @@ protected:
 	uint8_t m_regdata[REGISTERS];         // register data
 	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms
+
+	// Everything the per-sample phase step needs, decoded when the registers
+	// change rather than re-extracted for every operator on every sample (the
+	// same layout as OPZ, so the same vector kernel serves both). OPM has one
+	// LFO and no fixed-frequency mode: those entries stay zero.
+	alignas(16) uint32_t m_step_eff_base[OPERATORS] = {};  // keycode with the gaps removed
+	alignas(16) uint32_t m_step_octave[OPERATORS] = {};
+	alignas(16) uint32_t m_step_delta[OPERATORS] = {};     // coarse detune, in 1/64ths
+	alignas(16) uint32_t m_step_detune[OPERATORS] = {};    // detune by keycode
+	alignas(16) uint32_t m_step_multiple[OPERATORS] = {};  // frequency multiplier, x.4
+	alignas(16) uint32_t m_step_zero[OPERATORS] = {};      // fixed-frequency mask, rate, substep: unused
+	alignas(16) uint32_t m_step_pm_shift[CHANNELS] = {};   // signed, negative shifts right
+	alignas(16) uint32_t m_step_pm_live[CHANNELS] = {};    // zero where sensitivity is zero
+	alignas(16) uint32_t m_step_pm2_zero[CHANNELS] = {};   // no second LFO
 };
 
+
+
+// A write to an OPM register is a plain store (register 0x19 stores to one of
+// two places, chosen by bit 7 of the data), so repeating a write changes
+// nothing that a cache reads. Key-on is handled by the engine, which always
+// counts it as a change.
+template<>
+constexpr bool write_is_pure<opm_registers>(uint16_t) { return true; }
+
+// Operator numbering puts a slot's eight channels in eight consecutive
+// operators, and both offsets are the plain index, so every register the step
+// needs loads as eight consecutive bytes with nothing to gather.
+template<>
+inline bool dynamic_phase_steps<opm_registers>(opm_registers &regs, int32_t lfo_raw_pm, uint32_t count, uint32_t *step)
+{
+	return regs.all_phase_steps(lfo_raw_pm, count, step);
+}
+
+// OPM channel offsets are the channel numbers, so the sensitivity fields for
+// all eight channels sit in eight consecutive register bytes.
+template<>
+inline void lfo_am_offsets<opm_registers>(opm_registers const &regs, uint32_t const *, uint32_t count, uint32_t *out)
+{
+	assert(count == opm_registers::CHANNELS);
+	(void)count;
+	regs.all_lfo_am_offsets(out);
+}
 
 
 //*********************************************************

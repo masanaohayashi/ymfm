@@ -29,6 +29,8 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ymfm_opm.h"
+#include "ymfm_dynstep.h"
+#include "ymfm_fmout.h"
 #include "ymfm_fm.ipp"
 
 namespace ymfm
@@ -251,6 +253,55 @@ uint32_t opm_registers::lfo_am_offset(uint32_t choffs) const
 
 
 //-------------------------------------------------
+//  all_phase_steps - every operator's phase step
+//  for this sample, with the vector kernel
+//-------------------------------------------------
+
+bool opm_registers::all_phase_steps(int32_t lfo_raw_pm, uint32_t count, uint32_t *step)
+{
+#if YMFM_HAVE_VECTOR_DYNSTEP
+	assert(count <= OPERATORS);
+	// the kernel takes the PM value as a signed byte; OPM's is the waveform's
+	// signed byte scaled by a depth of at most 127/128, so it always fits
+	assert(lfo_raw_pm >= -128 && lfo_raw_pm <= 127);
+	dyn_step_block block;
+	block.step = step;
+	block.eff_base = m_step_eff_base;
+	block.octave = m_step_octave;
+	block.delta = m_step_delta;
+	block.detune = m_step_detune;
+	block.multiple = m_step_multiple;
+	block.fix_mask = m_step_zero;
+	block.fix_rate = m_step_zero;
+	block.substep = m_step_zero;
+	block.pm_shift = m_step_pm_shift;
+	block.pm_live = m_step_pm_live;
+	block.pm2_shift = m_step_pm2_zero;
+	block.pm2_live = m_step_pm2_zero;
+	block.lfo_raw_pm = lfo_raw_pm & 0xff;
+	block.count = count;
+	block.any_fixed = false;
+	dyn_step_clock(block);
+	return true;
+#else
+	(void)lfo_raw_pm; (void)count; (void)step;
+	return false;
+#endif
+}
+
+
+//-------------------------------------------------
+//  all_lfo_am_offsets - every channel's AM offset
+//-------------------------------------------------
+
+void opm_registers::all_lfo_am_offsets(uint32_t *out) const
+{
+	static uint8_t const no_second_lfo[8] = { 0 };
+	lfo_am_offsets_x8(&m_regdata[0x38], no_second_lfo, m_lfo_am, 0, out);
+}
+
+
+//-------------------------------------------------
 //  cache_operator_data - fill the operator cache
 //  with prefetched data
 //-------------------------------------------------
@@ -279,6 +330,26 @@ void opm_registers::cache_operator_data(uint32_t choffs, uint32_t opoffs, opdata
 	cache.multiple = op_multiple(opoffs) * 2;
 	if (cache.multiple == 0)
 		cache.multiple = 1;
+
+	// Everything the per-sample step needs, decoded here rather than pulled
+	// back out of the registers for every operator on every sample. The
+	// keycode in bits 6-9 is gappy, mapping 12 values over 16 in each octave;
+	// multiplying the 4-bit value by 3/4 removes the gaps so a delta can be
+	// added, and the 6-bit fraction goes back underneath. The kernel's
+	// multiplier is an x.4, so the x.1 one is scaled by 8.
+	static const int16_t s_detune2_delta_step[4] = { 0, (600*64+50)/100, (781*64+50)/100, (950*64+50)/100 };
+	m_step_eff_base[opoffs] = ((bitfield(block_freq, 6, 4) - bitfield(block_freq, 8, 2)) << 6)
+		| bitfield(block_freq, 0, 6);
+	m_step_octave[opoffs] = bitfield(block_freq, 10, 3);
+	m_step_delta[opoffs] = uint32_t(int32_t(s_detune2_delta_step[op_detune2(opoffs)]));
+	m_step_detune[opoffs] = uint32_t(cache.detune);
+	m_step_multiple[opoffs] = cache.multiple << 3;
+
+	// the sensitivity is per channel, so this lands on the same entry once
+	// for each of the channel's operators
+	uint32_t const sens = ch_lfo_pm_sens(choffs);
+	m_step_pm_shift[choffs] = uint32_t(int32_t(sens) - ((sens >= 6) ? 5 : 6));
+	m_step_pm_live[choffs] = (sens != 0) ? 0xffffffffu : 0u;
 
 	// phase step, or PHASE_STEP_DYNAMIC if PM is active; this depends on
 	// block_freq, detune, and multiple, so compute it after we've done those
